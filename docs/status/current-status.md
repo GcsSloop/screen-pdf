@@ -38,6 +38,17 @@
 - `v28` 只做局部角点精修。
 - `v28` 不应替代 `r3`。
 
+## 命名规则
+
+统一模型命名已正式记录，后续新增统一蒸馏模型时必须遵守：
+
+- 对外发布名：`deep_screen_v{major}.pt`
+- 内部技术名：`ds_corner_unified_distill_v{major}`
+
+详细规则见：
+
+- [model-naming-rules.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-naming-rules.md)
+
 ## 当前关键问题
 
 1. local-corner 仍未满足最终目标：
