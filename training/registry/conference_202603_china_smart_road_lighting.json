@@ -1,0 +1,12 @@
+{
+  "dataset_slug": "conference_202603_china_smart_road_lighting",
+  "source_root": "/Users/gcssloop/WorkSpace/AIGC/展会/2026/202603 中国智慧道路照明大会",
+  "raw_alias": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/data/raw/conference_202603_china_smart_road_lighting",
+  "project_count": 22,
+  "page_count": 720,
+  "reviewed_pages": 702,
+  "pages_with_manual_quad": 591,
+  "split_file": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/data/splits/cross_project/conference_202603_china_smart_road_lighting_split_v1.json",
+  "annotation_file": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/data/curated/annotations/conference_202603_china_smart_road_lighting_pages.jsonl",
+  "generated_at_plan": "2026-03-25-dataset-organization"
+}
