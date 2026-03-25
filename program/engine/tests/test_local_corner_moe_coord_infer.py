@@ -1,0 +1,1 @@
+../test_local_corner_moe_coord_infer.py

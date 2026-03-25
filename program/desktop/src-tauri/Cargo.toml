@@ -1,0 +1,24 @@
+[package]
+name = "screen-pdf"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "screen_pdf_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.2", features = [] }
+
+[dependencies]
+anyhow = "1.0.98"
+chrono = { version = "0.4.42", default-features = true, features = ["clock"] }
+image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
+kamadak-exif = "0.6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.1.1", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.0.1"
+
+[profile.dev]
+incremental = true

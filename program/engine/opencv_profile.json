@@ -1,0 +1,12 @@
+{
+  "clahe_clip_limit": 2.4,
+  "clahe_grid_size": 8,
+  "lsd_scale": 0.8,
+  "lsd_sigma_scale": 0.6,
+  "lsd_quant": 2.0,
+  "lsd_ang_th": 22.5,
+  "roi_expand_ratio": 0.12,
+  "grabcut_iters": 3,
+  "mask_close_kernel": 11,
+  "mask_open_kernel": 5
+}

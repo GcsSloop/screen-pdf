@@ -1,0 +1,1 @@
+../test_local_corner_simcc_infer.py

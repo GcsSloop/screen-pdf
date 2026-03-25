@@ -1,0 +1,1 @@
+../test_global_corner_train.py

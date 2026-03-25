@@ -1,0 +1,1 @@
+../corner_patch_infer.py

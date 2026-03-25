@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Screen PDF Desktop",
+  "version": "0.1.0",
+  "identifier": "com.gcssloop.screenpdfdesktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Screen PDF Desktop",
+        "width": 1360,
+        "height": 860,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**", "$TEMP/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/screen-pdf-desktop.png",
+      "icons/screen-pdf-desktop.icns",
+      "icons/screen-pdf-desktop.ico"
+    ],
+    "resources": [
+      "../../engine/detect_frame.py",
+      "../../engine/perspective_detect.py",
+      "../../engine/two_stage_corner_pipeline.py",
+      "../../engine/corner_train.py",
+      "../../engine/dataset_benchmark.py",
+      "../../engine/local_corner_refine.py",
+      "../../engine/local_corner_heatmap.py",
+      "../../engine/local_corner_moe.py",
+      "../../engine/local_corner_moe_coord.py",
+      "../../engine/vendor",
+      "../../../models/runtime"
+    ]
+  }
+}
