@@ -23,6 +23,27 @@
 - `promoted/`
   - 经过验证后，准备晋升为运行时或候选运行时的模型与说明。
 
+## 统一蒸馏主线
+
+当前统一蒸馏主线已锁定为：
+
+- 对外版本：`deep_screen_v1`
+- 内部版本：`ds_corner_unified_distill_v1`
+- teacher：`r3`、`v28`
+
+对应的演进根目录：
+
+- `runs/deep_screen_v1/`
+
+每一轮演进都必须使用独立 round 目录，例如：
+
+- `runs/deep_screen_v1/round_001/`
+- `runs/deep_screen_v1/round_002/`
+
+round 目录的详细约定见：
+
+- [docs/status/distillation-run-convention.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/distillation-run-convention.md)
+
 ## 与 `models/runtime` 的关系
 
 - `training/checkpoints` 是训练产物。

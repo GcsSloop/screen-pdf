@@ -23,6 +23,20 @@
 | `promoted_at` | 晋升时间 |
 | `notes` | 备注 |
 
+## 锁定主线
+
+当前已经锁定的统一蒸馏主线是：
+
+- `public_name = deep_screen_v1`
+- `internal_name = ds_corner_unified_distill_v1`
+- `teacher_models = [r3, v28]`
+
+当前首轮演进目录是：
+
+```text
+training/runs/deep_screen_v1/round_001/
+```
+
 ## Registry 记录原则
 
 1. `public_name` 和 `internal_name` 必须一一对应。
@@ -30,6 +44,7 @@
 3. 只有 `status=promoted` 的模型，才允许进入 runtime 默认集合。
 4. `candidate` 只能留在训练/实验侧，不应作为默认发布版本。
 5. `rejected` 和 `deprecated` 只保留历史记录，不进入默认加载路径。
+6. 每一轮蒸馏、测试和演进数据必须放在独立 round 目录中。
 
 ## Runtime 目录约定
 
@@ -70,4 +85,3 @@ models/runtime/deep_screen_v{major}.pt
    - `models/runtime`
    - `docs/status/current-status.md`
 3. 如果同一版本既有内部权重名又有对外发布名，发布名优先用于 runtime 和用户入口，内部名优先用于训练与审计。
-

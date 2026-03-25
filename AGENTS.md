@@ -16,8 +16,9 @@
 2. [docs/current-status.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/current-status.md)
 3. [docs/status/model-naming-rules.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-naming-rules.md)
 4. [docs/status/model-release-convention.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-release-convention.md)
-5. [docs/repository-layout.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/architecture/repository-layout.md)
-6. [docs/key-metrics.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/key-metrics.md)
+5. [docs/status/distillation-run-convention.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/distillation-run-convention.md)
+6. [docs/repository-layout.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/architecture/repository-layout.md)
+7. [docs/key-metrics.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/key-metrics.md)
 
 ## 代码地图
 

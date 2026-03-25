@@ -50,6 +50,28 @@
 - [model-naming-rules.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-naming-rules.md)
 - [model-release-convention.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-release-convention.md)
 
+## 蒸馏主线
+
+当前已锁定的蒸馏主线：
+
+- `deep_screen_v1`
+- 内部名：`ds_corner_unified_distill_v1`
+- teacher：`r3`、`v28`
+
+首轮独立目录：
+
+- [training/runs/deep_screen_v1/round_001/README.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/training/runs/deep_screen_v1/round_001/README.md)
+
+轮次目录约定：
+
+- 每一轮测试、演进、评估都必须放在独立 round 目录。
+- round 目录下的数据、报告、checkpoint、日志不能和其他 round 混放。
+- round 的记录以 `manifest.json` 为准。
+
+详细规则见：
+
+- [distillation-run-convention.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/distillation-run-convention.md)
+
 ## 当前关键问题
 
 1. local-corner 仍未满足最终目标：
