@@ -1,0 +1,30 @@
+node_modules/
+dist/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.DS_Store
+program/desktop/src-tauri/target/
+program/desktop/src-tauri/gen/
+
+# Public repository hygiene: keep source/docs/runtime models, exclude data and large experiment assets.
+data/*
+!data/README.md
+!data/.gitkeep
+
+training/*
+!training/README.md
+!training/reports/
+!training/reports/*.md
+!training/registry/
+!training/registry/*.json
+
+research/*
+!research/README.md
+
+# Large experiment artifacts should stay out of the public repo.
+research/experiments/
+*.ckpt
+*.onnx
+*.safetensors
