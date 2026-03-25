@@ -48,6 +48,7 @@
 详细规则见：
 
 - [model-naming-rules.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-naming-rules.md)
+- [model-release-convention.md](/Users/gcssloop/WorkSpace/AIGC/screen-pdf/docs/status/model-release-convention.md)
 
 ## 当前关键问题
 

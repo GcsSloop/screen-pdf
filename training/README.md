@@ -16,7 +16,10 @@
 - `reports/`
   - 训练总结、对比报告、回归结论。
 - `registry/`
-  - 记录每一代模型、配置、数据集版本、关键指标。
+  - 记录每一代数据集、模型版本、发布名、教师模型、关键指标。
+  - 数据集记录继续沿用 `dataset_slug.json`。
+  - 统一模型发布记录建议使用 `deep_screen_v{major}.json`。
+  - 字段约定见 `registry/model-release-template.json` 和 `docs/status/model-release-convention.md`。
 - `promoted/`
   - 经过验证后，准备晋升为运行时或候选运行时的模型与说明。
 
@@ -30,5 +33,5 @@
 
 1. 在 `training/runs` 产出训练结果
 2. 在 `training/reports` 写清楚训练集、验证集、指标和结论
-3. 在 `training/registry` 记录模型版本和来源
+3. 在 `training/registry` 记录模型版本、发布名、教师模型和来源
 4. 只有通过门槛的模型，才复制到 `models/runtime`

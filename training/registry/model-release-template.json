@@ -1,0 +1,22 @@
+{
+  "public_name": "deep_screen_v1",
+  "internal_name": "ds_corner_unified_distill_v1",
+  "status": "candidate",
+  "teacher_models": [
+    "r3",
+    "v28"
+  ],
+  "training_dataset": "conference_202603_china_smart_road_lighting",
+  "validation_summary": {
+    "holdout": {
+      "point_error_mean": 0.0,
+      "point_le_0_01_ratio": 0.0,
+      "avg_infer_ms": 0.0
+    }
+  },
+  "runtime_files": [
+    "models/runtime/deep_screen_v1.pt"
+  ],
+  "promoted_at": "",
+  "notes": "Fill in when the model is promoted."
+}
