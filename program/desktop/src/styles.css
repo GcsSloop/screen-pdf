@@ -868,17 +868,39 @@ input {
   border-color: rgba(37, 99, 235, 0.32);
 }
 
+.candidate-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .candidate-row .meta,
 .candidate-row .score {
   color: #475569;
   font-size: 12px;
 }
 
-.candidate-base {
-  margin-top: 4px;
+.candidate-reset {
+  border: 1px solid rgba(148, 163, 184, 0.48);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #fff;
+  color: #2563eb;
   font-size: 12px;
-  color: #1d4ed8;
   font-weight: 500;
+  cursor: pointer;
+}
+
+.candidate-reset:disabled {
+  color: #94a3b8;
+  background: #f8fafc;
+  cursor: not-allowed;
+}
+
+.candidate-reset:not(:disabled):hover {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: #eff6ff;
 }
 
 .empty {

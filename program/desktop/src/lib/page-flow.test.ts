@@ -7,7 +7,19 @@ import {
   movePage,
   resolveWorkingQuad
 } from "./page-flow";
-import type { PageRecord, Point } from "./types";
+import type { Candidate, PageRecord, Point } from "./types";
+
+function candidate(method: string, quad: Point[], overrides: Partial<Candidate> = {}): Candidate {
+  return {
+    method,
+    score: 0.9,
+    quad,
+    originalQuad: quad,
+    manualQuad: null,
+    metrics: {},
+    ...overrides
+  };
+}
 
 function page(id: string): PageRecord {
   return {
@@ -19,7 +31,14 @@ function page(id: string): PageRecord {
     confidence: 0.9,
     bestMethod: "contour_quad",
     selectedCandidateIndex: 0,
-    candidates: [],
+    candidates: [
+      candidate("contour_quad", [
+        [0, 0],
+        [100, 0],
+        [100, 100],
+        [0, 100]
+      ])
+    ],
     activeQuad: [
       [0, 0],
       [100, 0],
@@ -62,9 +81,9 @@ describe("page flow", () => {
       [8, 8],
       [2, 8]
     ];
-    const updated = applyDraftQuadToPage(page("a"), draft, 0);
-    expect(updated.manualQuad).toEqual(draft);
-    expect(updated.manualBaseCandidateIndex).toBe(0);
+    const updated = applyDraftQuadToPage(page("a"), draft);
+    expect(updated.candidates[0]?.manualQuad).toEqual(draft);
+    expect(updated.activeQuad).toEqual(draft);
     expect(updated.status).toBe("reviewed");
   });
 
@@ -83,20 +102,23 @@ describe("page flow", () => {
     const original = {
       ...page("a"),
       status: "needs_review" as const,
-      manualQuad: [
-        [1, 1],
-        [99, 1],
-        [99, 99],
-        [1, 99]
-      ] as Point[],
-      candidates: [candidate]
+      candidates: [
+        {
+          ...candidate,
+          manualQuad: [
+            [1, 1],
+            [99, 1],
+            [99, 99],
+            [1, 99]
+          ] as Point[]
+        }
+      ]
     };
 
     const updated = applyCandidateToPage(original, 0);
 
     expect(updated.selectedCandidateIndex).toBe(0);
-    expect(updated.activeQuad).toEqual(candidate.quad);
-    expect(updated.manualQuad).toBeNull();
+    expect(updated.activeQuad).toEqual(original.candidates[0]?.manualQuad);
     expect(updated.status).toBe("reviewed");
   });
 

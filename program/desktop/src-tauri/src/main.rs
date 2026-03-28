@@ -21,6 +21,10 @@ struct Candidate {
     method: String,
     score: f64,
     quad: Vec<[f64; 2]>,
+    #[serde(rename = "originalQuad", default)]
+    original_quad: Option<Vec<[f64; 2]>>,
+    #[serde(rename = "manualQuad", default)]
+    manual_quad: Option<Vec<[f64; 2]>>,
     metrics: serde_json::Value,
     #[serde(default)]
     source: Option<String>,
@@ -561,12 +565,14 @@ fn fallback_engine_result(image_path: &Path) -> EngineResult {
     let candidate = Candidate {
         method: "full_frame_fallback".to_string(),
         score: 0.0,
-        quad,
+        quad: quad.clone(),
         metrics: serde_json::json!({
             "fallback": 1.0,
             "image_width": width,
             "image_height": height
         }),
+        original_quad: Some(quad.clone()),
+        manual_quad: None,
         source: Some("fallback".to_string()),
         model_id: Some("full_frame_fallback".to_string()),
         debug_only: false,
@@ -1053,6 +1059,8 @@ mod tests {
                 method: "contour_quad".to_string(),
                 score: 0.95,
                 quad: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+                original_quad: Some(vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]),
+                manual_quad: None,
                 metrics: serde_json::json!({}),
                 source: Some("opencv".to_string()),
                 model_id: Some("contour_quad".to_string()),
@@ -1104,6 +1112,29 @@ mod tests {
 
         let decoded: ProjectFile = serde_json::from_value(value).expect("deserialize project");
         assert_eq!(decoded.pages[0].manual_base_candidate_index, Some(0));
+    }
+
+    #[test]
+    fn candidate_round_trips_manual_override() {
+        let candidate = Candidate {
+            method: "v28".to_string(),
+            score: 0.9,
+            quad: vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]],
+            original_quad: Some(vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]),
+            manual_quad: Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]),
+            metrics: serde_json::json!({}),
+            source: Some("runtime".to_string()),
+            model_id: Some("v28".to_string()),
+            debug_only: false,
+        };
+
+        let value = serde_json::to_value(&candidate).expect("serialize candidate");
+        assert_eq!(value["originalQuad"][0][0], 0.0);
+        assert_eq!(value["manualQuad"][0][0], 1.0);
+
+        let decoded: Candidate = serde_json::from_value(value).expect("deserialize candidate");
+        assert_eq!(decoded.original_quad.as_ref().and_then(|quad| quad.first()).map(|point| point[0]), Some(0.0));
+        assert_eq!(decoded.manual_quad.as_ref().and_then(|quad| quad.first()).map(|point| point[0]), Some(1.0));
     }
 
     #[test]

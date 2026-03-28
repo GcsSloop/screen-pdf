@@ -5,7 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import appIconUrl from "../icons/screen-pdf-desktop.png";
 import { buildCandidateDebugLabel, buildCandidateTitle } from "./lib/candidate-display";
-import { buildRenderedCandidates } from "./lib/manual-candidate";
+import {
+  clearCandidateManualOverride,
+  getEffectiveCandidateQuad,
+  migrateLegacyManualOverride
+} from "./lib/candidate-overrides";
 
 import {
   buildExportPanelState,
@@ -391,31 +395,25 @@ function quadEquals(left: Point[] | null | undefined, right: Point[] | null | un
 
 function hasPendingDraft(page: PageRecord | null): boolean {
   if (!page || !state.draftQuad) return false;
-  return !quadEquals(state.draftQuad, page.manualQuad ?? page.activeQuad);
+  return !quadEquals(state.draftQuad, page.activeQuad);
 }
 
 function currentMethodLabel(page: PageRecord): string {
-  if (page.manualQuad?.length) {
-    const baseIndex =
-      page.manualBaseCandidateIndex !== undefined && page.manualBaseCandidateIndex !== null
-        ? page.manualBaseCandidateIndex
-        : page.selectedCandidateIndex;
-    const baseCandidate = page.candidates[baseIndex];
-    return baseCandidate ? `manual_annotation · base ${buildCandidateTitle(baseCandidate)}` : "manual_annotation";
+  const candidate = page.candidates[page.selectedCandidateIndex];
+  if (!candidate) {
+    return page.bestMethod ?? "manual";
   }
-  return page.candidates[page.selectedCandidateIndex]?.method ?? page.bestMethod ?? "manual";
+  return candidate.manualQuad?.length
+    ? `${buildCandidateTitle(candidate)} · 已人工调整`
+    : buildCandidateTitle(candidate);
 }
 
 function currentManualBaseLabel(page: PageRecord): string {
-  if (!page.manualQuad?.length) {
+  const candidate = page.candidates[page.selectedCandidateIndex];
+  if (!candidate?.manualQuad?.length) {
     return "无";
   }
-  const baseIndex =
-    page.manualBaseCandidateIndex !== undefined && page.manualBaseCandidateIndex !== null
-      ? page.manualBaseCandidateIndex
-      : page.selectedCandidateIndex;
-  const baseCandidate = page.candidates[baseIndex];
-  return baseCandidate ? buildCandidateTitle(baseCandidate) : "未知";
+  return `${buildCandidateTitle(candidate)}（当前候选）`;
 }
 
 function statusClass(status: PageRecord["status"]): string {
@@ -457,12 +455,12 @@ function detailsHtml(page: PageRecord): string {
 }
 
 function setProject(project: ProjectFile) {
+  project.pages = project.pages.map((page) => migrateLegacyManualOverride(page));
   const activePage = resolveActivePage(project);
   state.activePage = activePage;
   state.project = withSelectedPage(project, activePage?.id ?? null);
   state.activeHandle = null;
   state.dragOrigin = null;
-  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   state.infoPage = null;
   exportState = {
@@ -503,7 +501,6 @@ function resetAppState() {
   state.activePage = null;
   state.activeHandle = null;
   state.dragOrigin = null;
-  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   state.dragPageId = null;
   state.infoPage = null;
@@ -578,7 +575,6 @@ function setActivePage(pageId: string) {
   state.project = withSelectedPage(state.project, pageId);
   state.activeHandle = null;
   state.dragOrigin = null;
-  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   renderPageList();
   void renderActivePage();
@@ -723,7 +719,6 @@ function renderPageList() {
       state.infoPage = state.infoPage?.id === page.id ? null : state.infoPage;
       state.activeHandle = null;
       state.dragOrigin = null;
-      state.dragBaseCandidateIndex = null;
       state.draftQuad = null;
       currentImage = null;
       currentImageUsesFallback = false;
@@ -789,7 +784,7 @@ async function ensurePreview(page: PageRecord, requestId?: number): Promise<stri
   try {
     const previewPath = await invoke<string>("generate_preview", {
       imagePath: page.path,
-      quad: page.manualQuad ?? page.activeQuad
+      quad: page.activeQuad
     });
     page.previewPath = previewPath;
     if (requestId === undefined || commitMatchesActivePage(requestId, page.id)) {
@@ -806,25 +801,51 @@ async function ensurePreview(page: PageRecord, requestId?: number): Promise<stri
 
 function renderCandidateList(page: PageRecord) {
   candidateList.innerHTML = "";
-  for (const rendered of buildRenderedCandidates(page)) {
-    const { candidate, active, kind, originalIndex, baseCandidate } = rendered;
+  for (const [index, candidate] of page.candidates.entries()) {
+    const hasManualOverride = Boolean(candidate.manualQuad?.length);
     const row = document.createElement("div");
-    row.className = `candidate-row${active ? " active" : ""}${kind === "manual" ? " manual" : ""}`;
+    row.className = `candidate-row${index === page.selectedCandidateIndex ? " active" : ""}${
+      hasManualOverride ? " manual" : ""
+    }`;
     row.innerHTML = `
-      <div><strong>${buildCandidateTitle(candidate)}</strong></div>
+      <div class="candidate-row-head">
+        <strong>${buildCandidateTitle(candidate)}</strong>
+        <button class="candidate-reset" ${hasManualOverride ? "" : "disabled"}>恢复默认</button>
+      </div>
       <div class="meta">${buildCandidateDebugLabel(candidate)}</div>
-      <div class="score">评分 ${candidate.score.toFixed(4)}</div>
-      ${
-        kind === "manual"
-          ? `<div class="candidate-base">base：${baseCandidate ? buildCandidateTitle(baseCandidate) : "未知"}</div>`
-          : ""
-      }
+      <div class="score">评分 ${candidate.score.toFixed(4)}${hasManualOverride ? " · 已人工调整" : ""}</div>
     `;
-    if (kind === "original" && originalIndex !== null) {
-      row.addEventListener("click", () => {
-        applyCandidate(page, originalIndex);
-      });
-    }
+    row.addEventListener("click", () => {
+      applyCandidate(page, index);
+    });
+    const resetButton = row.querySelector(".candidate-reset") as HTMLButtonElement;
+    resetButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (resetButton.disabled || !state.project) {
+        return;
+      }
+      if (!window.confirm(`确认将候选方案“${buildCandidateTitle(candidate)}”恢复为默认计算结果吗？`)) {
+        return;
+      }
+      const updatedCandidate = clearCandidateManualOverride(candidate);
+      const updatedPage: PageRecord = {
+        ...page,
+        candidates: page.candidates.map((entry, entryIndex) => (entryIndex === index ? updatedCandidate : entry)),
+        activeQuad:
+          index === page.selectedCandidateIndex ? getEffectiveCandidateQuad(updatedCandidate) : page.activeQuad,
+        previewPath: null
+      };
+      state.project = {
+        ...state.project,
+        pages: state.project.pages.map((entry) => (entry.id === updatedPage.id ? updatedPage : entry))
+      };
+      state.activePage = updatedPage;
+      renderCandidateList(updatedPage);
+      renderPageDetails(updatedPage);
+      renderPageList();
+      drawCanvas(updatedPage);
+      await ensurePreview(updatedPage);
+    });
     candidateList.appendChild(row);
   }
 }
@@ -841,7 +862,7 @@ function renderPageDetails(page: PageRecord) {
     <div>状态：${statusLabel(page.status)}</div>
     <div>置信度：${page.confidence.toFixed(4)}</div>
     <div>当前方案：${currentMethodLabel(page)}</div>
-    <div>人工基线：${currentManualBaseLabel(page)}</div>
+    <div>人工修正：${currentManualBaseLabel(page)}</div>
     <div>创建时间：${page.details.createdAt}</div>
     <div>拍摄时间：${page.details.capturedAt ?? "无"}</div>
     <div>图片尺寸：${page.details.width} x ${page.details.height}</div>
@@ -1042,7 +1063,6 @@ function applyCandidate(page: PageRecord, index: number) {
     };
   }
   state.activePage = updated;
-  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   renderCandidateList(updated);
   renderMeta();
@@ -1100,18 +1120,13 @@ async function commitDraftQuad() {
   const page = getActivePage();
   if (!page || !state.project || !state.draftQuad || !hasPendingDraft(page)) {
     state.draftQuad = null;
-    state.dragBaseCandidateIndex = null;
     if (page) {
       drawCanvas(page);
     }
     return;
   }
   const requestId = ++activeViewRequestId;
-  const updated = applyDraftQuadToPage(
-    page,
-    state.draftQuad,
-    state.dragBaseCandidateIndex ?? page.manualBaseCandidateIndex ?? page.selectedCandidateIndex
-  );
+  const updated = applyDraftQuadToPage(page, state.draftQuad);
   updated.previewPath = null;
   state.project = {
     ...state.project,
@@ -1120,7 +1135,6 @@ async function commitDraftQuad() {
   state.activePage = updated;
   state.project = withSelectedPage(state.project, updated.id);
   state.draftQuad = null;
-  state.dragBaseCandidateIndex = null;
   renderPageList();
   renderMeta();
   renderExportSection();
@@ -1175,9 +1189,6 @@ for (const handle of cornerHandles) {
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
     state.dragOrigin = screenToImagePoint(event);
-    state.dragBaseCandidateIndex = page.manualQuad?.length
-      ? page.manualBaseCandidateIndex ?? page.selectedCandidateIndex
-      : page.selectedCandidateIndex;
     state.activeHandle = handleIndex;
     state.draftQuad = workingQuad(page).map((entry) => [...entry]) as Point[];
     syncEditorOverlay(page);
@@ -1225,7 +1236,6 @@ window.addEventListener("keydown", async (event) => {
   }
   if (event.key.toLowerCase() === "r") {
     state.draftQuad = null;
-    state.dragBaseCandidateIndex = null;
     drawCanvas(page);
     renderPageDetails(page);
     return;

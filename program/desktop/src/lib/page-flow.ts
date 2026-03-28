@@ -1,4 +1,8 @@
 import type { PageRecord, Point } from "./types";
+import {
+  getEffectiveCandidateQuad,
+  withCandidateManualOverride
+} from "./candidate-overrides";
 
 export function movePage(pages: PageRecord[], draggedId: string, targetId: string): PageRecord[] {
   const next = [...pages];
@@ -13,7 +17,7 @@ export function movePage(pages: PageRecord[], draggedId: string, targetId: strin
 }
 
 export function resolveWorkingQuad(page: PageRecord, draftQuad: Point[] | null): Point[] {
-  return draftQuad ?? page.manualQuad ?? page.activeQuad;
+  return draftQuad ?? page.candidates[page.selectedCandidateIndex]?.manualQuad ?? page.activeQuad;
 }
 
 export function applyCandidateToPage(page: PageRecord, index: number): PageRecord {
@@ -25,22 +29,25 @@ export function applyCandidateToPage(page: PageRecord, index: number): PageRecor
   return {
     ...page,
     selectedCandidateIndex: index,
-    activeQuad: candidate.quad.map((point) => [...point]) as Point[],
+    activeQuad: getEffectiveCandidateQuad(candidate),
     manualQuad: null,
     manualBaseCandidateIndex: null,
     status: "reviewed"
   };
 }
 
-export function applyDraftQuadToPage(
-  page: PageRecord,
-  draftQuad: Point[],
-  manualBaseCandidateIndex: number | null = page.manualBaseCandidateIndex ?? page.selectedCandidateIndex
-): PageRecord {
+export function applyDraftQuadToPage(page: PageRecord, draftQuad: Point[]): PageRecord {
+  const selectedCandidate = page.candidates[page.selectedCandidateIndex];
+  if (!selectedCandidate) {
+    return page;
+  }
+  const candidates = page.candidates.map((candidate, index) =>
+    index === page.selectedCandidateIndex ? withCandidateManualOverride(candidate, draftQuad) : candidate
+  );
   return {
     ...page,
-    manualQuad: draftQuad.map((point) => [...point]) as Point[],
-    manualBaseCandidateIndex,
+    candidates,
+    activeQuad: draftQuad.map((point) => [...point]) as Point[],
     status: "reviewed"
   };
 }

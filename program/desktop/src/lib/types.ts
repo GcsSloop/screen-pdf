@@ -15,6 +15,8 @@ export interface Candidate {
   method: string;
   score: number;
   quad: Point[];
+  originalQuad?: Point[];
+  manualQuad?: Point[] | null;
   metrics: Record<string, number>;
   source?: string;
   modelId?: string;
