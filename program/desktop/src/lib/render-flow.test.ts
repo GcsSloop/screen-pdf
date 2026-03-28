@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildDisplaySourceCandidates,
+  buildPreviewSourceCandidates,
   buildThumbnailSourceCandidates,
   canCommitPageRender,
   resolveIntrinsicImageSize
@@ -39,6 +40,13 @@ describe("render flow", () => {
     expect(
       buildThumbnailSourceCandidates("/tmp/source.jpeg", "/tmp/source-thumb.jpg", "/tmp/source-preview.png")
     ).toEqual(["/tmp/source-thumb.jpg", "/tmp/source-preview.png", "/tmp/source.jpeg"]);
+  });
+
+  it("prefers the generated preview first and falls back to the source image", () => {
+    expect(buildPreviewSourceCandidates("/tmp/source.jpeg", "/tmp/source-preview.png")).toEqual([
+      "/tmp/source-preview.png",
+      "/tmp/source.jpeg"
+    ]);
   });
 
   it("rejects stale async render results from previous pages", () => {
