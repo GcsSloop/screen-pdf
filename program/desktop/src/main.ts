@@ -4,7 +4,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import appIconUrl from "../icons/screen-pdf-desktop.png";
-import { buildCandidateDebugLabel, buildCandidateTitle } from "./lib/candidate-display";
+import { buildCandidateDebugLabel, buildCandidateRowMeta, buildCandidateTitle } from "./lib/candidate-display";
 import {
   clearCandidateManualOverride,
   getEffectiveCandidateQuad,
@@ -50,6 +50,7 @@ import {
 } from "./lib/page-flow";
 import {
   buildDisplaySourceCandidates,
+  buildPreviewSourceCandidates,
   buildThumbnailSourceCandidates,
   canCommitPageRender,
   resolveIntrinsicImageSize
@@ -286,6 +287,7 @@ const cancelScanBtn = document.querySelector("#cancelScanBtn") as HTMLButtonElem
 const scanStatusText = document.querySelector("#scanStatusText") as HTMLDivElement;
 const scanProgressBar = document.querySelector("#scanProgressBar") as HTMLDivElement;
 const scanProgressMeta = document.querySelector("#scanProgressMeta") as HTMLDivElement;
+let previewSourceState: { sources: string[]; index: number } | null = null;
 let currentImage: HTMLImageElement | null = null;
 let currentImageUsesFallback = false;
 let thumbObserver: IntersectionObserver | null = null;
@@ -325,6 +327,17 @@ function showAppError(message: string) {
 function setPreviewSource(previewPath: string) {
   previewVersion += 1;
   previewImage.src = buildPreviewVersionedPath(convertFileSrc(previewPath), previewVersion);
+}
+
+function updatePreviewImage(page: PageRecord) {
+  previewVersion += 1;
+  previewSourceState = {
+    sources: buildPreviewSourceCandidates(page.path, page.previewPath).map((path) =>
+      path === page.previewPath ? buildPreviewVersionedPath(convertFileSrc(path), previewVersion) : convertFileSrc(path)
+    ),
+    index: 0
+  };
+  previewImage.src = previewSourceState.sources[0] ?? "";
 }
 
 function commitMatchesActivePage(requestId: number, pageId: string): boolean {
@@ -803,6 +816,7 @@ function renderCandidateList(page: PageRecord) {
   candidateList.innerHTML = "";
   for (const [index, candidate] of page.candidates.entries()) {
     const hasManualOverride = Boolean(candidate.manualQuad?.length);
+    const rowMeta = buildCandidateRowMeta(candidate);
     const row = document.createElement("div");
     row.className = `candidate-row${index === page.selectedCandidateIndex ? " active" : ""}${
       hasManualOverride ? " manual" : ""
@@ -810,10 +824,12 @@ function renderCandidateList(page: PageRecord) {
     row.innerHTML = `
       <div class="candidate-row-head">
         <strong>${buildCandidateTitle(candidate)}</strong>
-        <button class="candidate-reset" ${hasManualOverride ? "" : "disabled"}>恢复默认</button>
       </div>
       <div class="meta">${buildCandidateDebugLabel(candidate)}</div>
-      <div class="score">评分 ${candidate.score.toFixed(4)}${hasManualOverride ? " · 已人工调整" : ""}</div>
+      <div class="candidate-row-foot">
+        <div class="score">${rowMeta.scoreLabel}</div>
+        <button class="candidate-reset" ${rowMeta.restoreDisabled ? "disabled" : ""}>${rowMeta.restoreButtonLabel}</button>
+      </div>
     `;
     row.addEventListener("click", () => {
       applyCandidate(page, index);
@@ -954,8 +970,8 @@ async function renderActivePage() {
   if (!commitMatchesActivePage(requestId, page.id)) {
     return;
   }
-  if (page.previewPath) {
-    setPreviewSource(page.previewPath);
+  if (page.previewPath || page.path) {
+    updatePreviewImage(page);
   } else {
     await ensurePreview(page, requestId);
   }
@@ -1412,6 +1428,16 @@ cancelScanBtn.addEventListener("click", async () => {
 renderExportSection();
 renderModal();
 renderScanModal();
+
+previewImage.addEventListener("error", () => {
+  if (!previewSourceState) {
+    return;
+  }
+  previewSourceState.index += 1;
+  if (previewSourceState.index < previewSourceState.sources.length) {
+    previewImage.src = previewSourceState.sources[previewSourceState.index] ?? "";
+  }
+});
 
 void listen<ScanProgressEvent>("scan-progress", (event) => {
   updateScanSession(event.payload.scanId, event.payload);

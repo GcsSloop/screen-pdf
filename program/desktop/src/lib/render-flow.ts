@@ -33,6 +33,10 @@ export function buildThumbnailSourceCandidates(
   return uniqueSources;
 }
 
+export function buildPreviewSourceCandidates(imagePath: string, previewPath?: string | null): string[] {
+  return buildDisplaySourceCandidates(imagePath, previewPath, true);
+}
+
 export function canCommitPageRender(
   requestId: number,
   activeRequestId: number,

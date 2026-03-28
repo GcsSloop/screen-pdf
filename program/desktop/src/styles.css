@@ -869,10 +869,13 @@ input {
 }
 
 .candidate-row-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.candidate-row-head strong {
+  display: block;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .candidate-row .meta,
@@ -881,7 +884,16 @@ input {
   font-size: 12px;
 }
 
+.candidate-row-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
 .candidate-reset {
+  flex: 0 0 auto;
   border: 1px solid rgba(148, 163, 184, 0.48);
   border-radius: 999px;
   padding: 6px 10px;
@@ -890,6 +902,7 @@ input {
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .candidate-reset:disabled {
