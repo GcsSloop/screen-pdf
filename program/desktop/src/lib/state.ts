@@ -5,7 +5,6 @@ export interface AppState {
   activePage: PageRecord | null;
   activeHandle: number | null;
   dragOrigin: Point | null;
-  dragBaseCandidateIndex: number | null;
   draftQuad: Point[] | null;
   dragPageId: string | null;
   infoPage: PageRecord | null;
@@ -17,7 +16,6 @@ export const initialState = (): AppState => ({
   activePage: null,
   activeHandle: null,
   dragOrigin: null,
-  dragBaseCandidateIndex: null,
   draftQuad: null,
   dragPageId: null,
   infoPage: null,
