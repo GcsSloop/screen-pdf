@@ -1080,6 +1080,33 @@ mod tests {
     }
 
     #[test]
+    fn project_page_record_round_trips_manual_base_candidate_index() {
+        let page = sample_page("page-1", "reviewed", 0.9);
+        let project = ProjectFile {
+            version: 1,
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![PageRecord {
+                manual_quad: Some(vec![[1.0, 2.0], [10.0, 2.0], [10.0, 12.0], [1.0, 12.0]]),
+                manual_base_candidate_index: Some(0),
+                ..page
+            }],
+        };
+
+        let value = serde_json::to_value(&project).expect("serialize project");
+        assert_eq!(value["pages"][0]["manualBaseCandidateIndex"], 0);
+
+        let decoded: ProjectFile = serde_json::from_value(value).expect("deserialize project");
+        assert_eq!(decoded.pages[0].manual_base_candidate_index, Some(0));
+    }
+
+    #[test]
     fn supported_extensions_are_detected() {
         assert!(supported_image(Path::new("foo.jpeg")));
         assert!(supported_image(Path::new("foo.HEIC")));
