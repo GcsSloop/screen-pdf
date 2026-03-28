@@ -4,6 +4,8 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import appIconUrl from "../icons/screen-pdf-desktop.png";
+import { buildCandidateDebugLabel, buildCandidateTitle } from "./lib/candidate-display";
+import { buildRenderedCandidates } from "./lib/manual-candidate";
 
 import {
   buildExportPanelState,
@@ -11,6 +13,15 @@ import {
   resolveActivePage,
   withSelectedPage
 } from "./lib/export-flow";
+import {
+  BUCKET_OPTIONS,
+  DEFAULT_REVIEW_TAGS,
+  FAILURE_TAG_OPTIONS,
+  formatBucketLabel,
+  formatFailureTags,
+  normalizeFailureTags,
+  sanitizeBucket
+} from "./lib/project-tags";
 import {
   buildPolygonPoints,
   calculateDisplayGeometry,
@@ -20,6 +31,12 @@ import {
   updateQuadHandle,
   type DisplayGeometry
 } from "./lib/editor-geometry";
+import {
+  MAGNIFIER_SIZE,
+  TOOLBAR_ICON_BUTTONS,
+  renderToolbarIcon,
+  resolveMagnifierPlacement
+} from "./lib/editor-ui";
 import {
   applyCandidateToPage,
   applyDraftQuadToPage,
@@ -35,8 +52,10 @@ import {
 } from "./lib/render-flow";
 import { initialState } from "./lib/state";
 import type {
+  DifficultyBucket,
   ExportOptions,
   ExportResult,
+  FailureTag,
   PageDetails,
   PageRecord,
   Point,
@@ -45,6 +64,28 @@ import type {
 } from "./lib/types";
 
 const state = initialState();
+const toolbarButtonMap = new Map(TOOLBAR_ICON_BUTTONS.map((item) => [item.id, item] as const));
+
+function renderToolbarButton(id: string): string {
+  const config = toolbarButtonMap.get(id);
+  if (!config) return "";
+  return `
+    <div class="toolbar-tip-shell">
+      <button
+        id="${config.id}"
+        class="toolbar-action icon-only${config.variant === "primary" ? " primary-action" : ""}"
+        aria-label="${config.label}"
+        title="${config.tooltip}"
+      >
+        <span class="toolbar-icon modern-icon" aria-hidden="true">${renderToolbarIcon(config.icon)}</span>
+      </button>
+      <div class="toolbar-tooltip" role="tooltip">
+        <strong>${config.label}</strong>
+        <span>${config.tooltip}</span>
+      </div>
+    </div>
+  `;
+}
 
 const DEFAULT_EXPORT_OPTIONS = (): ExportOptions => ({
   outputPath: "",
@@ -71,35 +112,19 @@ const app = document.querySelector("#app") as HTMLDivElement;
 app.innerHTML = `
   <div class="toolbar">
       <div class="toolbar-brand">
-      <img class="brand-mark" src="${appIconUrl}" alt="Screen PDF Desktop 图标" />
+      <img class="brand-mark" src="${appIconUrl}" alt="ScreenPDF 图标" />
       <div class="brand-copy">
-        <strong>Screen PDF Desktop</strong>
+        <strong>ScreenPDF</strong>
         <span>投屏照片矫正与可检索 PDF</span>
       </div>
     </div>
     <div class="toolbar-actions">
-      <button id="openFolderBtn" class="toolbar-action primary-action">
-        <span class="toolbar-icon" aria-hidden="true">📁</span>
-        <span>打开文件夹</span>
-      </button>
-      <button id="loadProjectBtn" class="toolbar-action">
-        <span class="toolbar-icon" aria-hidden="true">⤴</span>
-        <span>加载项目</span>
-      </button>
-      <button id="saveProjectBtn" class="toolbar-action">
-        <span class="toolbar-icon" aria-hidden="true">💾</span>
-        <span>保存项目</span>
-      </button>
-      <button id="markReviewedBtn" class="toolbar-action">
-        <span class="toolbar-icon" aria-hidden="true">✓</span>
-        <span>标记已确认</span>
-      </button>
+      ${renderToolbarButton("openFolderBtn")}
+      ${renderToolbarButton("loadProjectBtn")}
+      ${renderToolbarButton("saveProjectBtn")}
       <div class="toolbar-export">
         <div class="toolbar-popover-shell">
-          <button id="toggleExportSettingsBtn" class="toolbar-action">
-            <span class="toolbar-icon" aria-hidden="true">⚙</span>
-            <span>导出配置</span>
-          </button>
+          ${renderToolbarButton("toggleExportSettingsBtn")}
           <div id="exportPopover" class="toolbar-popover hidden">
             <div class="toolbar-popover-head">
               <h3>导出配置</h3>
@@ -136,10 +161,7 @@ app.innerHTML = `
             </div>
           </div>
         </div>
-        <button id="exportProjectBtn" class="toolbar-action primary-action">
-          <span class="toolbar-icon" aria-hidden="true">⇩</span>
-          <span>导出 PDF</span>
-        </button>
+        ${renderToolbarButton("exportProjectBtn")}
       </div>
     </div>
     <div class="meta">
@@ -163,6 +185,9 @@ app.innerHTML = `
           <svg id="editorOverlay" class="editor-overlay" viewBox="0 0 1 1" preserveAspectRatio="none">
             <polygon id="editorPolygon" class="editor-polygon"></polygon>
           </svg>
+          <div id="editorMagnifier" class="editor-magnifier hidden" aria-hidden="true">
+            <div class="editor-magnifier-crosshair"></div>
+          </div>
           <button class="corner-handle" data-handle-index="0" aria-label="左上角锚点"></button>
           <button class="corner-handle" data-handle-index="1" aria-label="右上角锚点"></button>
           <button class="corner-handle" data-handle-index="2" aria-label="右下角锚点"></button>
@@ -171,13 +196,9 @@ app.innerHTML = `
       </div>
       <div class="editor-actions">
         <div class="hintbar">
-          <span>四个锚点可独立拖动</span>
+          <span>四个锚点可独立拖动，松手后自动应用裁剪</span>
           <span>左侧拖拽顺序即导出顺序</span>
-          <span>点击“应用裁剪”后刷新右侧预览</span>
-        </div>
-        <div class="actionbar">
-          <button id="resetDraftBtn">重置草稿</button>
-          <button id="applyQuadBtn" class="primary">应用裁剪</button>
+          <span>右侧保留一个人工标注候选，并显示 base 来源</span>
         </div>
       </div>
     </main>
@@ -225,13 +246,10 @@ app.innerHTML = `
 const openFolderBtn = document.querySelector("#openFolderBtn") as HTMLButtonElement;
 const loadProjectBtn = document.querySelector("#loadProjectBtn") as HTMLButtonElement;
 const saveProjectBtn = document.querySelector("#saveProjectBtn") as HTMLButtonElement;
-const markReviewedBtn = document.querySelector("#markReviewedBtn") as HTMLButtonElement;
 const toggleExportSettingsBtn = document.querySelector("#toggleExportSettingsBtn") as HTMLButtonElement;
 const exportPopover = document.querySelector("#exportPopover") as HTMLDivElement;
 const chooseOutputBtn = document.querySelector("#chooseOutputBtn") as HTMLButtonElement;
 const exportProjectBtn = document.querySelector("#exportProjectBtn") as HTMLButtonElement;
-const resetDraftBtn = document.querySelector("#resetDraftBtn") as HTMLButtonElement;
-const applyQuadBtn = document.querySelector("#applyQuadBtn") as HTMLButtonElement;
 const outputPathInput = document.querySelector("#outputPathInput") as HTMLInputElement;
 const exportAllPagesInput = document.querySelector("#exportAllPagesInput") as HTMLInputElement;
 const includeAutoReadyInput = document.querySelector("#includeAutoReadyInput") as HTMLInputElement;
@@ -251,6 +269,7 @@ const reviewCount = document.querySelector("#reviewCount") as HTMLSpanElement;
 const previewImage = document.querySelector("#previewImage") as HTMLImageElement;
 const editorStage = document.querySelector("#editorStage") as HTMLDivElement;
 const editorImage = document.querySelector("#editorImage") as HTMLImageElement;
+const editorMagnifier = document.querySelector("#editorMagnifier") as HTMLDivElement;
 const editorOverlay = document.querySelector("#editorOverlay") as SVGSVGElement;
 const editorPolygon = document.querySelector("#editorPolygon") as SVGPolygonElement;
 const cornerHandles = Array.from(document.querySelectorAll(".corner-handle")) as HTMLButtonElement[];
@@ -375,6 +394,30 @@ function hasPendingDraft(page: PageRecord | null): boolean {
   return !quadEquals(state.draftQuad, page.manualQuad ?? page.activeQuad);
 }
 
+function currentMethodLabel(page: PageRecord): string {
+  if (page.manualQuad?.length) {
+    const baseIndex =
+      page.manualBaseCandidateIndex !== undefined && page.manualBaseCandidateIndex !== null
+        ? page.manualBaseCandidateIndex
+        : page.selectedCandidateIndex;
+    const baseCandidate = page.candidates[baseIndex];
+    return baseCandidate ? `manual_annotation · base ${buildCandidateTitle(baseCandidate)}` : "manual_annotation";
+  }
+  return page.candidates[page.selectedCandidateIndex]?.method ?? page.bestMethod ?? "manual";
+}
+
+function currentManualBaseLabel(page: PageRecord): string {
+  if (!page.manualQuad?.length) {
+    return "无";
+  }
+  const baseIndex =
+    page.manualBaseCandidateIndex !== undefined && page.manualBaseCandidateIndex !== null
+      ? page.manualBaseCandidateIndex
+      : page.selectedCandidateIndex;
+  const baseCandidate = page.candidates[baseIndex];
+  return baseCandidate ? buildCandidateTitle(baseCandidate) : "未知";
+}
+
 function statusClass(status: PageRecord["status"]): string {
   if (status === "reviewed") return "reviewed";
   if (status === "needs_review") return "review";
@@ -400,6 +443,9 @@ function detailsHtml(page: PageRecord): string {
   return `
     <div class="details-grid">
       <div><strong>名称</strong><span>${page.name}</span></div>
+      <div><strong>场次</strong><span>${page.eventSlug ?? "未设置"}</span></div>
+      <div><strong>难度</strong><span>${formatBucketLabel(sanitizeBucket(page.difficultyBucket))}</span></div>
+      <div><strong>标签</strong><span>${formatFailureTags(page.failureTags)}</span></div>
       <div><strong>尺寸</strong><span>${details.width} x ${details.height}</span></div>
       <div><strong>拍摄时间</strong><span>${details.capturedAt ?? "无"}</span></div>
       <div><strong>创建时间</strong><span>${details.createdAt}</span></div>
@@ -416,6 +462,7 @@ function setProject(project: ProjectFile) {
   state.project = withSelectedPage(project, activePage?.id ?? null);
   state.activeHandle = null;
   state.dragOrigin = null;
+  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   state.infoPage = null;
   exportState = {
@@ -434,11 +481,29 @@ function setProject(project: ProjectFile) {
   void renderActivePage();
 }
 
+function recomputeTagSummary(project: ProjectFile) {
+  const bucketCounts: Record<string, number> = {};
+  const failureTagCounts: Record<string, number> = {};
+  for (const page of project.pages) {
+    const bucket = sanitizeBucket(page.difficultyBucket);
+    bucketCounts[bucket] = (bucketCounts[bucket] ?? 0) + 1;
+    for (const tag of normalizeFailureTags(page.failureTags)) {
+      failureTagCounts[tag] = (failureTagCounts[tag] ?? 0) + 1;
+    }
+  }
+  project.tagSummary = {
+    pages: project.pages.length,
+    bucketCounts,
+    failureTagCounts
+  };
+}
+
 function resetAppState() {
   state.project = null;
   state.activePage = null;
   state.activeHandle = null;
   state.dragOrigin = null;
+  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   state.dragPageId = null;
   state.infoPage = null;
@@ -479,11 +544,31 @@ function renderScanModal() {
 
 function renderMeta() {
   const project = state.project;
-  projectName.textContent = project ? project.name : "未打开项目";
+  projectName.textContent = project ? `${project.name}${project.eventName ? ` · ${project.eventName}` : ""}` : "未打开项目";
   pageCount.textContent = project ? `${project.pages.length} 页` : "0 页";
   reviewCount.textContent = project
     ? `${project.pages.filter((page) => page.status === "needs_review").length} 页待确认`
     : "0 页待确认";
+}
+
+function updatePageBucket(page: PageRecord, bucket: DifficultyBucket) {
+  page.difficultyBucket = bucket;
+  page.reviewTags = page.reviewTags?.length ? page.reviewTags : [...DEFAULT_REVIEW_TAGS];
+  if (state.project) {
+    recomputeTagSummary(state.project);
+    renderMeta();
+  }
+  renderPageDetails(page);
+}
+
+function updatePageFailureTags(page: PageRecord, nextTags: FailureTag[]) {
+  page.failureTags = normalizeFailureTags(nextTags);
+  page.reviewTags = page.reviewTags?.length ? page.reviewTags : [...DEFAULT_REVIEW_TAGS];
+  if (state.project) {
+    recomputeTagSummary(state.project);
+    renderMeta();
+  }
+  renderPageDetails(page);
 }
 
 function setActivePage(pageId: string) {
@@ -493,6 +578,7 @@ function setActivePage(pageId: string) {
   state.project = withSelectedPage(state.project, pageId);
   state.activeHandle = null;
   state.dragOrigin = null;
+  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   renderPageList();
   void renderActivePage();
@@ -637,6 +723,7 @@ function renderPageList() {
       state.infoPage = state.infoPage?.id === page.id ? null : state.infoPage;
       state.activeHandle = null;
       state.dragOrigin = null;
+      state.dragBaseCandidateIndex = null;
       state.draftQuad = null;
       currentImage = null;
       currentImageUsesFallback = false;
@@ -719,38 +806,82 @@ async function ensurePreview(page: PageRecord, requestId?: number): Promise<stri
 
 function renderCandidateList(page: PageRecord) {
   candidateList.innerHTML = "";
-  for (const [index, candidate] of page.candidates.entries()) {
+  for (const rendered of buildRenderedCandidates(page)) {
+    const { candidate, active, kind, originalIndex, baseCandidate } = rendered;
     const row = document.createElement("div");
-    row.className = `candidate-row${index === page.selectedCandidateIndex ? " active" : ""}`;
+    row.className = `candidate-row${active ? " active" : ""}${kind === "manual" ? " manual" : ""}`;
     row.innerHTML = `
-      <div><strong>${candidate.method}</strong></div>
+      <div><strong>${buildCandidateTitle(candidate)}</strong></div>
+      <div class="meta">${buildCandidateDebugLabel(candidate)}</div>
       <div class="score">评分 ${candidate.score.toFixed(4)}</div>
+      ${
+        kind === "manual"
+          ? `<div class="candidate-base">base：${baseCandidate ? buildCandidateTitle(baseCandidate) : "未知"}</div>`
+          : ""
+      }
     `;
-    row.addEventListener("click", () => {
-      applyCandidate(page, index);
-    });
+    if (kind === "original" && originalIndex !== null) {
+      row.addEventListener("click", () => {
+        applyCandidate(page, originalIndex);
+      });
+    }
     candidateList.appendChild(row);
   }
 }
 
 function renderPageDetails(page: PageRecord) {
+  const bucket = sanitizeBucket(page.difficultyBucket);
+  const failureTags = normalizeFailureTags(page.failureTags);
+  const bucketReason = (page.bucketReason ?? []).filter(Boolean);
   pageMeta.innerHTML = `
-    <div><strong>${page.name}</strong></div>
+    <div class="page-meta-title">
+      <strong>${page.name}</strong>
+      <span class="meta-inline-note">${page.eventSlug ?? state.project?.eventSlug ?? "未设置场次"}</span>
+    </div>
     <div>状态：${statusLabel(page.status)}</div>
     <div>置信度：${page.confidence.toFixed(4)}</div>
-    <div>当前方案：${page.candidates[page.selectedCandidateIndex]?.method ?? page.bestMethod ?? "manual"}</div>
-    <div>待应用裁剪：${hasPendingDraft(page) ? "是" : "否"}</div>
+    <div>当前方案：${currentMethodLabel(page)}</div>
+    <div>人工基线：${currentManualBaseLabel(page)}</div>
     <div>创建时间：${page.details.createdAt}</div>
     <div>拍摄时间：${page.details.capturedAt ?? "无"}</div>
     <div>图片尺寸：${page.details.width} x ${page.details.height}</div>
+    <div class="tag-editor">
+      <label for="difficultyBucketSelect"><strong>粗标签分桶</strong></label>
+      <select id="difficultyBucketSelect">
+        ${BUCKET_OPTIONS.map((option) => `<option value="${option}" ${option === bucket ? "selected" : ""}>${formatBucketLabel(option)}</option>`).join("")}
+      </select>
+      <div class="tag-editor-label"><strong>失败标签</strong></div>
+      <div class="tag-checklist">
+        ${FAILURE_TAG_OPTIONS.map(
+          (tag) => `
+            <label class="tag-check-row">
+              <input type="checkbox" data-failure-tag="${tag}" ${failureTags.includes(tag) ? "checked" : ""} />
+              <span>${formatFailureTags([tag])}</span>
+            </label>
+          `
+        ).join("")}
+      </div>
+      <div class="tag-editor-note">自动原因：${bucketReason.length ? bucketReason.join("；") : "无"}</div>
+    </div>
   `;
+  const bucketSelect = pageMeta.querySelector("#difficultyBucketSelect") as HTMLSelectElement | null;
+  bucketSelect?.addEventListener("change", () => {
+    updatePageBucket(page, sanitizeBucket(bucketSelect.value));
+  });
+  const failureCheckboxes = Array.from(pageMeta.querySelectorAll("[data-failure-tag]")) as HTMLInputElement[];
+  for (const checkbox of failureCheckboxes) {
+    checkbox.addEventListener("change", () => {
+      const nextTags = failureCheckboxes
+        .filter((input) => input.checked)
+        .map((input) => input.dataset.failureTag as FailureTag);
+      updatePageFailureTags(page, nextTags);
+    });
+  }
 }
 
 async function renderActivePage() {
   const page = getActivePage();
   const requestId = ++activeViewRequestId;
-  applyQuadBtn.disabled = !page || !hasPendingDraft(page);
-  resetDraftBtn.disabled = !page || !state.draftQuad;
 
   if (!page) {
     currentImage = null;
@@ -838,6 +969,7 @@ function syncEditorOverlay(page: PageRecord | null) {
   if (!page || !currentImage || currentImageUsesFallback) {
     editorOverlay.setAttribute("viewBox", "0 0 1 1");
     editorPolygon.setAttribute("points", "");
+    editorMagnifier.classList.add("hidden");
     for (const handle of cornerHandles) {
       handle.style.display = "none";
     }
@@ -855,6 +987,34 @@ function syncEditorOverlay(page: PageRecord | null) {
     handle.style.top = `${point[1]}px`;
     handle.classList.toggle("active", state.activeHandle === index);
   }
+
+  if (state.activeHandle === null) {
+    editorMagnifier.classList.add("hidden");
+    return;
+  }
+
+  const handlePoint = displayQuad[state.activeHandle];
+  if (!handlePoint) {
+    editorMagnifier.classList.add("hidden");
+    return;
+  }
+
+  const placement = resolveMagnifierPlacement({
+    point: handlePoint,
+    activeHandle: state.activeHandle,
+    quad: displayQuad,
+    stage: {
+      width: displayGeometry.width,
+      height: displayGeometry.height
+    }
+  });
+  const zoom = 3;
+  editorMagnifier.classList.remove("hidden");
+  editorMagnifier.style.left = `${placement.anchorX}px`;
+  editorMagnifier.style.top = `${placement.anchorY}px`;
+  editorMagnifier.style.backgroundImage = `url("${editorImage.src}")`;
+  editorMagnifier.style.backgroundSize = `${displayGeometry.width * zoom}px ${displayGeometry.height * zoom}px`;
+  editorMagnifier.style.backgroundPosition = `${-handlePoint[0] * zoom + MAGNIFIER_SIZE / 2}px ${-handlePoint[1] * zoom + MAGNIFIER_SIZE / 2}px`;
 }
 
 function screenToImagePoint(event: PointerEvent): Point {
@@ -882,6 +1042,7 @@ function applyCandidate(page: PageRecord, index: number) {
     };
   }
   state.activePage = updated;
+  state.dragBaseCandidateIndex = null;
   state.draftQuad = null;
   renderCandidateList(updated);
   renderMeta();
@@ -921,13 +1082,52 @@ function renderExportSection() {
   ]) {
     control.disabled = !project || busy;
   }
-  exportProjectBtn.innerHTML = busy
-    ? `<span class="toolbar-icon" aria-hidden="true">…</span><span>导出中...</span>`
-    : `<span class="toolbar-icon" aria-hidden="true">⇩</span><span>导出 PDF</span>`;
+  exportProjectBtn.innerHTML = `<span class="toolbar-icon modern-icon" aria-hidden="true">${renderToolbarIcon(
+    busy ? "save" : "download"
+  )}</span>`;
+  exportProjectBtn.setAttribute(
+    "title",
+    busy ? "正在导出 PDF，请稍候。" : "按当前顺序导出 PDF，并应用压缩与 OCR 文本层。"
+  );
+  exportProjectBtn.setAttribute("aria-label", busy ? "导出中" : "导出 PDF");
 
   const panel = buildExportPanelState(project, exportOptions, exportState);
   exportStatus.className = `status-panel ${panel.tone}`;
   exportStatus.innerHTML = panel.body.replace(/\n/g, "<br />");
+}
+
+async function commitDraftQuad() {
+  const page = getActivePage();
+  if (!page || !state.project || !state.draftQuad || !hasPendingDraft(page)) {
+    state.draftQuad = null;
+    state.dragBaseCandidateIndex = null;
+    if (page) {
+      drawCanvas(page);
+    }
+    return;
+  }
+  const requestId = ++activeViewRequestId;
+  const updated = applyDraftQuadToPage(
+    page,
+    state.draftQuad,
+    state.dragBaseCandidateIndex ?? page.manualBaseCandidateIndex ?? page.selectedCandidateIndex
+  );
+  updated.previewPath = null;
+  state.project = {
+    ...state.project,
+    pages: state.project.pages.map((item) => (item.id === updated.id ? updated : item))
+  };
+  state.activePage = updated;
+  state.project = withSelectedPage(state.project, updated.id);
+  state.draftQuad = null;
+  state.dragBaseCandidateIndex = null;
+  renderPageList();
+  renderMeta();
+  renderExportSection();
+  renderPageDetails(updated);
+  renderCandidateList(updated);
+  drawCanvas(updated);
+  await ensurePreview(updated, requestId);
 }
 
 async function chooseOutputPath() {
@@ -975,12 +1175,13 @@ for (const handle of cornerHandles) {
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
     state.dragOrigin = screenToImagePoint(event);
+    state.dragBaseCandidateIndex = page.manualQuad?.length
+      ? page.manualBaseCandidateIndex ?? page.selectedCandidateIndex
+      : page.selectedCandidateIndex;
     state.activeHandle = handleIndex;
     state.draftQuad = workingQuad(page).map((entry) => [...entry]) as Point[];
     syncEditorOverlay(page);
     renderPageDetails(page);
-    applyQuadBtn.disabled = !hasPendingDraft(page);
-    resetDraftBtn.disabled = false;
   });
 }
 
@@ -996,17 +1197,16 @@ window.addEventListener("pointermove", (event) => {
   state.dragOrigin = point;
   syncEditorOverlay(page);
   renderPageDetails(page);
-  applyQuadBtn.disabled = !hasPendingDraft(page);
-  resetDraftBtn.disabled = false;
 });
 
-function stopHandleDrag() {
+async function stopHandleDrag() {
   state.activeHandle = null;
   state.dragOrigin = null;
   const page = getActivePage();
   if (page) {
     syncEditorOverlay(page);
   }
+  await commitDraftQuad();
 }
 
 window.addEventListener("pointerup", stopHandleDrag);
@@ -1016,10 +1216,6 @@ window.addEventListener("keydown", async (event) => {
   const page = getActivePage();
   if (!page) return;
   if (event.key === "Enter") {
-    if (hasPendingDraft(page)) {
-      applyQuadBtn.click();
-      return;
-    }
     page.status = "reviewed";
     renderPageList();
     renderMeta();
@@ -1029,10 +1225,9 @@ window.addEventListener("keydown", async (event) => {
   }
   if (event.key.toLowerCase() === "r") {
     state.draftQuad = null;
+    state.dragBaseCandidateIndex = null;
     drawCanvas(page);
     renderPageDetails(page);
-    applyQuadBtn.disabled = true;
-    resetDraftBtn.disabled = true;
     return;
   }
   const candidateIndex = Number(event.key) - 1;
@@ -1096,52 +1291,6 @@ saveProjectBtn.addEventListener("click", async () => {
   } catch (error) {
     showAppError(String(error));
   }
-});
-
-markReviewedBtn.addEventListener("click", () => {
-  const page = getActivePage();
-  if (!page) return;
-  page.status = "reviewed";
-  renderPageList();
-  renderMeta();
-  renderPageDetails(page);
-  renderExportSection();
-});
-
-resetDraftBtn.addEventListener("click", () => {
-  const page = getActivePage();
-  if (!page) return;
-  state.draftQuad = null;
-  drawCanvas(page);
-  renderPageDetails(page);
-  applyQuadBtn.disabled = true;
-  resetDraftBtn.disabled = true;
-});
-
-applyQuadBtn.addEventListener("click", async () => {
-  const page = getActivePage();
-  if (!page || !state.project || !state.draftQuad) return;
-  const requestId = ++activeViewRequestId;
-  const updated = applyDraftQuadToPage(page, state.draftQuad);
-  updated.previewPath = null;
-  state.project = {
-    ...state.project,
-    pages: state.project.pages.map((item) => (item.id === updated.id ? updated : item))
-  };
-  state.activePage = updated;
-  state.project = withSelectedPage(state.project, updated.id);
-  state.draftQuad = null;
-  renderPageList();
-  renderMeta();
-  renderExportSection();
-  renderPageDetails(updated);
-  drawCanvas(updated);
-  await ensurePreview(updated, requestId);
-  if (!commitMatchesActivePage(requestId, updated.id)) {
-    return;
-  }
-  applyQuadBtn.disabled = true;
-  resetDraftBtn.disabled = true;
 });
 
 chooseOutputBtn.addEventListener("click", () => {

@@ -62,8 +62,9 @@ describe("page flow", () => {
       [8, 8],
       [2, 8]
     ];
-    const updated = applyDraftQuadToPage(page("a"), draft);
+    const updated = applyDraftQuadToPage(page("a"), draft, 0);
     expect(updated.manualQuad).toEqual(draft);
+    expect(updated.manualBaseCandidateIndex).toBe(0);
     expect(updated.status).toBe("reviewed");
   });
 

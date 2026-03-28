@@ -1,10 +1,24 @@
 export type Point = [number, number];
+export type DifficultyBucket = "clean" | "hard" | "abnormal";
+export type FailureTag =
+  | "corner_out_of_frame"
+  | "edge_touch_border"
+  | "heavy_occlusion"
+  | "edge_only_visible"
+  | "black_frame"
+  | "low_contrast"
+  | "strong_perspective"
+  | "large_spill"
+  | "candidate_disagreement";
 
 export interface Candidate {
   method: string;
   score: number;
   quad: Point[];
   metrics: Record<string, number>;
+  source?: string;
+  modelId?: string;
+  debugOnly?: boolean;
 }
 
 export interface PageDetails {
@@ -29,8 +43,15 @@ export interface PageRecord {
   candidates: Candidate[];
   activeQuad: Point[];
   manualQuad?: Point[] | null;
+  manualBaseCandidateIndex?: number | null;
   previewPath?: string | null;
   details: PageDetails;
+  eventSlug?: string | null;
+  difficultyBucket?: DifficultyBucket | null;
+  failureTags?: FailureTag[] | null;
+  bucketReason?: string[] | null;
+  reviewTags?: string[] | null;
+  tagVersion?: number | null;
 }
 
 export interface ProjectFile {
@@ -39,6 +60,14 @@ export interface ProjectFile {
   sourceDir: string;
   projectPath?: string | null;
   selectedPageId?: string | null;
+  eventSlug?: string | null;
+  eventName?: string | null;
+  tagVersion?: number | null;
+  tagSummary?: {
+    pages?: number;
+    bucketCounts?: Record<string, number>;
+    failureTagCounts?: Record<string, number>;
+  } | null;
   pages: PageRecord[];
 }
 

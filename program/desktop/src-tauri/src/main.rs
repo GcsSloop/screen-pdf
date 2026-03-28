@@ -22,6 +22,12 @@ struct Candidate {
     score: f64,
     quad: Vec<[f64; 2]>,
     metrics: serde_json::Value,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(rename = "modelId", default)]
+    model_id: Option<String>,
+    #[serde(rename = "debugOnly", default)]
+    debug_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,10 +50,24 @@ struct PageRecord {
     active_quad: Vec<[f64; 2]>,
     #[serde(rename = "manualQuad")]
     manual_quad: Option<Vec<[f64; 2]>>,
+    #[serde(rename = "manualBaseCandidateIndex", default)]
+    manual_base_candidate_index: Option<usize>,
     #[serde(rename = "previewPath")]
     preview_path: Option<String>,
     #[serde(default)]
     details: PageDetails,
+    #[serde(rename = "eventSlug", default)]
+    event_slug: Option<String>,
+    #[serde(rename = "difficultyBucket", default)]
+    difficulty_bucket: Option<String>,
+    #[serde(rename = "failureTags", default)]
+    failure_tags: Vec<String>,
+    #[serde(rename = "bucketReason", default)]
+    bucket_reason: Vec<String>,
+    #[serde(rename = "reviewTags", default)]
+    review_tags: Vec<String>,
+    #[serde(rename = "tagVersion", default)]
+    tag_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,6 +91,14 @@ struct ProjectFile {
     project_path: Option<String>,
     #[serde(rename = "selectedPageId")]
     selected_page_id: Option<String>,
+    #[serde(rename = "eventSlug", default)]
+    event_slug: Option<String>,
+    #[serde(rename = "eventName", default)]
+    event_name: Option<String>,
+    #[serde(rename = "tagVersion", default)]
+    tag_version: Option<u32>,
+    #[serde(rename = "tagSummary", default)]
+    tag_summary: Option<serde_json::Value>,
     pages: Vec<PageRecord>,
 }
 
@@ -136,6 +164,12 @@ struct EngineBest {
     method: String,
     quad: Vec<[f64; 2]>,
     confidence: f64,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(rename = "modelId", default)]
+    model_id: Option<String>,
+    #[serde(rename = "debugOnly", default)]
+    debug_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,19 +225,25 @@ fn engine_dir(app: &AppHandle) -> Result<PathBuf> {
         .path()
         .resource_dir()
         .context("failed to resolve resource directory")?;
-    let direct = resource_dir.join("engine");
-    if direct.exists() {
-        return Ok(direct);
-    }
-    let tauri_bundle = resource_dir.join("_up_").join("engine");
-    if tauri_bundle.exists() {
-        return Ok(tauri_bundle);
+    if let Some(engine) = resolve_resource_path_from_base(&resource_dir, Path::new("engine")) {
+        return Ok(engine);
     }
     Err(anyhow!(
-        "failed to resolve engine directory inside resources: checked {} and {}",
-        direct.display(),
-        tauri_bundle.display()
+        "failed to resolve engine directory inside resources rooted at {}",
+        resource_dir.display()
     ))
+}
+
+fn resolve_resource_path_from_base(resource_dir: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut base = resource_dir.to_path_buf();
+    for _ in 0..=8 {
+        let candidate = base.join(relative);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        base = base.join("_up_");
+    }
+    None
 }
 
 fn bundled_python_candidates(engine: &Path) -> Vec<PathBuf> {
@@ -311,6 +351,21 @@ fn python_cmd(app: &AppHandle) -> Result<PathBuf> {
     Err(anyhow!(
         "no usable python interpreter found for engine dependencies; checked: {candidates}"
     ))
+}
+
+fn configure_engine_command(command: &mut Command, app: &AppHandle) {
+    command.env("SCREEN_PDF_DEBUG_DUAL_MODEL", "1");
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        if let Some(model_dir) =
+            resolve_resource_path_from_base(&resource_dir, Path::new("models").join("runtime").as_path())
+        {
+            command.env("SCREEN_PDF_MODEL_DIR", &model_dir);
+            let model_path = model_dir.join("deep_screen_v1_debug.pt");
+            if model_path.exists() {
+                command.env("SCREEN_PDF_DEEP_SCREEN_V1_MODEL", model_path);
+            }
+        }
+    }
 }
 
 fn scan_cancel_flag() -> &'static AtomicBool {
@@ -499,6 +554,9 @@ fn fallback_engine_result(image_path: &Path) -> EngineResult {
         method: "full_frame_fallback".to_string(),
         quad: quad.clone(),
         confidence: 0.0,
+        source: Some("fallback".to_string()),
+        model_id: Some("full_frame_fallback".to_string()),
+        debug_only: false,
     };
     let candidate = Candidate {
         method: "full_frame_fallback".to_string(),
@@ -509,6 +567,9 @@ fn fallback_engine_result(image_path: &Path) -> EngineResult {
             "image_width": width,
             "image_height": height
         }),
+        source: Some("fallback".to_string()),
+        model_id: Some("full_frame_fallback".to_string()),
+        debug_only: false,
     };
     EngineResult {
         best,
@@ -529,7 +590,9 @@ fn raw_engine_result_to_engine_result(raw: RawEngineResult, image_path: &Path) -
 #[cfg_attr(not(test), allow(dead_code))]
 fn run_engine_detect(app: &AppHandle, image_path: &Path) -> Result<EngineResult> {
     let engine = engine_dir(app)?;
-    let output = Command::new(python_cmd(app)?)
+    let mut command = Command::new(python_cmd(app)?);
+    configure_engine_command(&mut command, app);
+    let output = command
         .arg(engine.join("detect_frame.py"))
         .arg("detect")
         .arg("--image")
@@ -563,7 +626,9 @@ fn run_engine_detect_batch(
     fs::write(&manifest_path, serde_json::to_vec(&manifest)?)
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
 
-    let mut child = Command::new(python_cmd(app)?)
+    let mut command = Command::new(python_cmd(app)?);
+    configure_engine_command(&mut command, app);
+    let mut child = command
         .arg(engine.join("detect_frame.py"))
         .arg("detect-batch")
         .arg("--manifest")
@@ -862,8 +927,15 @@ fn build_project(app: &AppHandle, folder_path: &Path, scan_id: u64) -> Result<Pr
             selected_candidate_index: 0,
             active_quad: detection.best.quad,
             manual_quad: None,
+            manual_base_candidate_index: None,
             preview_path: None,
             details,
+            event_slug: None,
+            difficulty_bucket: None,
+            failure_tags: Vec::new(),
+            bucket_reason: Vec::new(),
+            review_tags: Vec::new(),
+            tag_version: None,
             candidates: detection.candidates,
         });
     }
@@ -892,8 +964,31 @@ fn build_project(app: &AppHandle, folder_path: &Path, scan_id: u64) -> Result<Pr
         source_dir: folder_path.to_string_lossy().to_string(),
         project_path: None,
         selected_page_id: pages.first().map(|page| page.id.clone()),
+        event_slug: None,
+        event_name: None,
+        tag_version: None,
+        tag_summary: None,
         pages,
     })
+}
+
+fn preferred_project_file_in_dir(_folder_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+fn load_project_file(project_path: &Path) -> Result<ProjectFile> {
+    let content = fs::read_to_string(project_path)
+        .with_context(|| format!("failed to read {}", project_path.display()))?;
+    let mut project =
+        serde_json::from_str::<ProjectFile>(&content).with_context(|| format!("invalid {}", project_path.display()))?;
+    for page in &mut project.pages {
+        let current_thumb = page.thumb_path.as_deref().map(Path::new);
+        if current_thumb.is_none_or(|thumb| !thumb.exists()) {
+            page.thumb_path = generate_thumbnail(Path::new(&page.path));
+        }
+    }
+    project.project_path = Some(project_path.to_string_lossy().to_string());
+    Ok(project)
 }
 
 #[tauri::command]
@@ -918,16 +1013,7 @@ async fn save_project(project_path: String, project: ProjectFile) -> Result<Stri
 
 #[tauri::command]
 async fn load_project(project_path: String) -> Result<ProjectFile, String> {
-    let content = fs::read_to_string(&project_path).map_err(|err| err.to_string())?;
-    let mut project = serde_json::from_str::<ProjectFile>(&content).map_err(|err| err.to_string())?;
-    for page in &mut project.pages {
-        let current_thumb = page.thumb_path.as_deref().map(Path::new);
-        if current_thumb.is_none_or(|thumb| !thumb.exists()) {
-            page.thumb_path = generate_thumbnail(Path::new(&page.path));
-        }
-    }
-    project.project_path = Some(project_path);
-    Ok(project)
+    load_project_file(Path::new(&project_path)).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -968,9 +1054,13 @@ mod tests {
                 score: 0.95,
                 quad: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
                 metrics: serde_json::json!({}),
+                source: Some("opencv".to_string()),
+                model_id: Some("contour_quad".to_string()),
+                debug_only: false,
             }],
             active_quad: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
             manual_quad: None,
+            manual_base_candidate_index: None,
             preview_path: None,
             details: PageDetails {
                 width: 1000,
@@ -980,6 +1070,12 @@ mod tests {
                 created_at: "2026-03-21 10:00:00".to_string(),
                 modified_at: "2026-03-21 10:00:00".to_string(),
             },
+            event_slug: None,
+            difficulty_bucket: None,
+            failure_tags: Vec::new(),
+            bucket_reason: Vec::new(),
+            review_tags: Vec::new(),
+            tag_version: None,
         }
     }
 
@@ -1081,6 +1177,60 @@ mod tests {
     }
 
     #[test]
+    fn resolve_resource_path_from_base_supports_nested_up_segments() {
+        let base = std::env::temp_dir().join(format!(
+            "screen-pdf-resource-layout-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested_engine = base.join("_up_").join("_up_").join("engine");
+        fs::create_dir_all(&nested_engine).unwrap();
+        let target = nested_engine.join("detect_frame.py");
+        fs::write(&target, "print('ok')\n").unwrap();
+
+        let resolved =
+            resolve_resource_path_from_base(&base, Path::new("engine").join("detect_frame.py").as_path());
+
+        assert_eq!(resolved.as_deref(), Some(target.as_path()));
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolve_resource_path_from_base_supports_deeper_nested_up_segments() {
+        let base = std::env::temp_dir().join(format!(
+            "screen-pdf-resource-layout-deep-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested_model = base
+            .join("_up_")
+            .join("_up_")
+            .join("_up_")
+            .join("models")
+            .join("runtime");
+        fs::create_dir_all(&nested_model).unwrap();
+        let target = nested_model.join("deep_screen_v1_debug.pt");
+        fs::write(&target, "stub").unwrap();
+
+        let resolved = resolve_resource_path_from_base(
+            &base,
+            Path::new("models")
+                .join("runtime")
+                .join("deep_screen_v1_debug.pt")
+                .as_path(),
+        );
+
+        assert_eq!(resolved.as_deref(), Some(target.as_path()));
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn python_probe_checks_required_modules() {
         let probe = python_probe_code();
         assert!(probe.contains("cv2"));
@@ -1147,6 +1297,46 @@ mod tests {
             Some("chi_sim+eng")
         );
         assert!(value["options"].get("ocrLanguages").is_none());
+    }
+
+    #[test]
+    fn open_folder_does_not_auto_resolve_v1_project_file() {
+        let base = std::env::temp_dir().join(format!(
+            "screen-pdf-project-v1-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let legacy = base.join("screen-pdf-project.json");
+        let tagged = base.join("screen-pdf-project_v1.json");
+        fs::write(&legacy, "{}").unwrap();
+        fs::write(&tagged, "{}").unwrap();
+
+        let resolved = preferred_project_file_in_dir(&base);
+        assert!(resolved.is_none());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn open_folder_does_not_auto_resolve_legacy_project_file() {
+        let base = std::env::temp_dir().join(format!(
+            "screen-pdf-project-legacy-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let legacy = base.join("screen-pdf-project.json");
+        fs::write(&legacy, "{}").unwrap();
+
+        let resolved = preferred_project_file_in_dir(&base);
+        assert!(resolved.is_none());
+
+        fs::remove_dir_all(base).unwrap();
     }
 }
 

@@ -27,14 +27,20 @@ export function applyCandidateToPage(page: PageRecord, index: number): PageRecor
     selectedCandidateIndex: index,
     activeQuad: candidate.quad.map((point) => [...point]) as Point[],
     manualQuad: null,
+    manualBaseCandidateIndex: null,
     status: "reviewed"
   };
 }
 
-export function applyDraftQuadToPage(page: PageRecord, draftQuad: Point[]): PageRecord {
+export function applyDraftQuadToPage(
+  page: PageRecord,
+  draftQuad: Point[],
+  manualBaseCandidateIndex: number | null = page.manualBaseCandidateIndex ?? page.selectedCandidateIndex
+): PageRecord {
   return {
     ...page,
     manualQuad: draftQuad.map((point) => [...point]) as Point[],
+    manualBaseCandidateIndex,
     status: "reviewed"
   };
 }
