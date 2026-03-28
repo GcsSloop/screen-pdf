@@ -1,0 +1,33 @@
+{
+  "public_name": "deep_screen_r1_2026_03_28",
+  "internal_name": "runtime_three_stage_r44_c03_r41_20260328",
+  "status": "promoted",
+  "teacher_models": [
+    "r44_epoch_001",
+    "c03",
+    "r41"
+  ],
+  "training_dataset": "conference_202603_china_smart_road_lighting + hangzhou_same_site",
+  "validation_summary": {
+    "broad_full_686": {
+      "point_error_mean": 0.0053,
+      "point_le_0_01_ratio": 0.8918,
+      "point_le_0_05_ratio": 0.9971,
+      "max_corner_le_0_03_ratio": 0.8892
+    },
+    "same_site_wo_extremes": {
+      "point_le_0_01_ratio": 0.8542
+    },
+    "r41_holdout_all": {
+      "point_le_0_01_ratio": 0.8494
+    }
+  },
+  "runtime_files": [
+    "models/runtime/global_corner_model.pt",
+    "models/runtime/corner_heatmap_model.pt",
+    "models/runtime/local_corner_moe_coord_model.pt",
+    "models/runtime/deep_screen_r1_2026_03_28.json"
+  ],
+  "promoted_at": "2026-03-28",
+  "notes": "Pinned runtime release for app version 0.2.0. This release keeps the existing flat runtime filenames for compatibility while promoting the r44 + c03 + r41 stack under one release name."
+}

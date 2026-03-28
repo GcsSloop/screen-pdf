@@ -8,6 +8,15 @@
 - `corner_heatmap_model.pt`
 - `local_corner_moe_coord_model.pt`
 - `local_corner_moe_model.pt`
+- `deep_screen_r1_2026_03_28.json`
+
+## 当前固定发布
+
+- `deep_screen_r1_2026_03_28`
+- app 版本：`0.2.0`
+- coarse：`r44`
+- roi：`c03`
+- local：`r41`
 
 ## 统一蒸馏模型
 
@@ -25,4 +34,3 @@
 2. 这里不放实验中间件。
 3. 这里只放默认运行时会加载的正式模型，或其兼容资产。
 4. 新的统一模型晋升后，应同步更新 `training/registry` 和 `docs/status`。
-
