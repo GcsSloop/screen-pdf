@@ -13,6 +13,7 @@ from perspective_detect import (
     combine_score_from_metrics,
     detect_best_candidate_with_profile,
 )
+from supervision_utils import resolve_supervision_quad
 
 
 MetricProfile = dict[str, dict[str, float]]
@@ -103,7 +104,7 @@ def load_training_samples(
     for project_path in sorted(dataset_root.rglob("screen-pdf-project.json")):
         data = json.loads(project_path.read_text(encoding="utf-8"))
         for page in data.get("pages", []):
-            manual_quad = page.get("manualQuad")
+            manual_quad, _ = resolve_supervision_quad(page)
             if rerun_detection:
                 image_path = _resolve_image_path(project_path, data, page)
                 candidates = (

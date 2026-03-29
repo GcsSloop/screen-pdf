@@ -8,6 +8,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 from perspective_detect import order_points
+from supervision_utils import resolve_supervision_quad
 
 
 PageRecord = dict[str, Any]
@@ -35,7 +36,7 @@ def load_active_manual_pages(dataset_root: Path) -> list[PageRecord]:
     for project_path in sorted(dataset_root.rglob("screen-pdf-project.json")):
         data = json.loads(project_path.read_text(encoding="utf-8"))
         for page in data.get("pages", []):
-            manual_quad = page.get("manualQuad")
+            manual_quad, _ = resolve_supervision_quad(page)
             active_quad = page.get("activeQuad")
             if not manual_quad or not active_quad:
                 continue
@@ -176,14 +177,11 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(text + ("\n" if text else ""), encoding="utf-8")
 
 
-def export_local_corner_patch_dataset(
-    dataset_root: Path,
+def export_local_corner_patch_dataset_from_splits(
+    split_pages: dict[str, list[PageRecord]],
     output_dir: Path,
-    seed: int = 7,
-    test_ratio: float = 0.25,
-    focus_projects: list[str] | tuple[str, ...] | None = None,
-    holdout_projects: list[str] | tuple[str, ...] | None = None,
-    focus_test_ratio: float = 0.25,
+    predicted_quad_getter: Callable[[PageRecord], np.ndarray] | None = None,
+    dataset_root: Path | None = None,
     patch_size: int | None = 96,
     patch_scale: float = 0.2,
     patch_min: int = 96,
@@ -192,40 +190,16 @@ def export_local_corner_patch_dataset(
     bl_patch_scale_multiplier: float = 1.0,
     bl_bottom_vertical_bias: float = 0.0,
 ) -> dict[str, Any]:
-    from dataset_benchmark import build_project_aware_split, build_split
-
-    pages = load_active_manual_pages(dataset_root)
     output_dir.mkdir(parents=True, exist_ok=True)
-    focus_values = [str(item) for item in (focus_projects or []) if str(item).strip()]
-    holdout_values = [str(item) for item in (holdout_projects or []) if str(item).strip()]
-    if focus_values or holdout_values:
-        split = build_project_aware_split(
-            pages,
-            focus_projects=focus_values,
-            holdout_projects=holdout_values,
-            test_ratio=test_ratio,
-            focus_test_ratio=focus_test_ratio,
-            seed=seed,
-        )
-        split_pages: dict[str, list[PageRecord]] = {
-            "train": list(split["train"]),
-            "test": list(split["test"]) + list(split["focus_test"]),
-            "focus_test": list(split["focus_test"]),
-            "broad_test": list(split["test"]),
-            "holdout": list(split["holdout"]),
-        }
-    else:
-        split = build_split(pages, test_ratio=test_ratio, seed=seed)
-        split_pages = {
-            "train": list(split["train"]),
-            "test": list(split["test"]),
-        }
     exported: dict[str, list[dict[str, Any]]] = {name: [] for name in split_pages}
     for split_name, split_rows in split_pages.items():
         patch_dir = output_dir / "patches" / split_name
         patch_dir.mkdir(parents=True, exist_ok=True)
         for page in split_rows:
-            predicted_quad = np.array(page["active_quad"], dtype=np.float32)
+            predicted_quad = np.array(
+                predicted_quad_getter(page) if predicted_quad_getter is not None else page["active_quad"],
+                dtype=np.float32,
+            )
             manual_quad = np.array(page["manual_quad"], dtype=np.float32)
             for corner_index in range(4):
                 sample = build_local_corner_patch_sample(
@@ -277,18 +251,18 @@ def export_local_corner_patch_dataset(
                     }
                 )
         _write_jsonl(output_dir / f"{split_name}.jsonl", exported[split_name])
-    summary = {
-        "dataset_root": str(dataset_root),
+    return {
+        "dataset_root": str(dataset_root) if dataset_root is not None else None,
         "output_dir": str(output_dir),
-        "page_count": len(pages),
+        "page_count": sum(len(rows) for rows in split_pages.values()),
         "pages": sum(len(rows) for rows in split_pages.values()) * 4,
-        "train_pages": len(split_pages["train"]),
-        "test_pages": len(split_pages["test"]),
+        "train_pages": len(split_pages.get("train", [])),
+        "test_pages": len(split_pages.get("test", [])),
         "focus_test_pages": len(split_pages.get("focus_test", [])),
         "broad_test_pages": len(split_pages.get("broad_test", split_pages.get("test", []))),
         "holdout_pages": len(split_pages.get("holdout", [])),
-        "train_samples": len(exported["train"]),
-        "test_samples": len(exported["test"]),
+        "train_samples": len(exported.get("train", [])),
+        "test_samples": len(exported.get("test", [])),
         "focus_test_samples": len(exported.get("focus_test", [])),
         "broad_test_samples": len(exported.get("broad_test", [])),
         "holdout_samples": len(exported.get("holdout", [])),
@@ -300,6 +274,64 @@ def export_local_corner_patch_dataset(
         "bl_patch_scale_multiplier": bl_patch_scale_multiplier,
         "bl_bottom_vertical_bias": bl_bottom_vertical_bias,
     }
+
+
+def export_local_corner_patch_dataset(
+    dataset_root: Path,
+    output_dir: Path,
+    seed: int = 7,
+    test_ratio: float = 0.25,
+    focus_projects: list[str] | tuple[str, ...] | None = None,
+    holdout_projects: list[str] | tuple[str, ...] | None = None,
+    focus_test_ratio: float = 0.25,
+    patch_size: int | None = 96,
+    patch_scale: float = 0.2,
+    patch_min: int = 96,
+    patch_max: int = 256,
+    bottom_vertical_bias: float = 0.0,
+    bl_patch_scale_multiplier: float = 1.0,
+    bl_bottom_vertical_bias: float = 0.0,
+) -> dict[str, Any]:
+    from dataset_benchmark import build_project_aware_split, build_split
+
+    pages = load_active_manual_pages(dataset_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    focus_values = [str(item) for item in (focus_projects or []) if str(item).strip()]
+    holdout_values = [str(item) for item in (holdout_projects or []) if str(item).strip()]
+    if focus_values or holdout_values:
+        split = build_project_aware_split(
+            pages,
+            focus_projects=focus_values,
+            holdout_projects=holdout_values,
+            test_ratio=test_ratio,
+            focus_test_ratio=focus_test_ratio,
+            seed=seed,
+        )
+        split_pages: dict[str, list[PageRecord]] = {
+            "train": list(split["train"]),
+            "test": list(split["test"]) + list(split["focus_test"]),
+            "focus_test": list(split["focus_test"]),
+            "broad_test": list(split["test"]),
+            "holdout": list(split["holdout"]),
+        }
+    else:
+        split = build_split(pages, test_ratio=test_ratio, seed=seed)
+        split_pages = {
+            "train": list(split["train"]),
+            "test": list(split["test"]),
+        }
+    summary = export_local_corner_patch_dataset_from_splits(
+        split_pages=split_pages,
+        output_dir=output_dir,
+        dataset_root=dataset_root,
+        patch_size=patch_size,
+        patch_scale=patch_scale,
+        patch_min=patch_min,
+        patch_max=patch_max,
+        bottom_vertical_bias=bottom_vertical_bias,
+        bl_patch_scale_multiplier=bl_patch_scale_multiplier,
+        bl_bottom_vertical_bias=bl_bottom_vertical_bias,
+    )
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
 

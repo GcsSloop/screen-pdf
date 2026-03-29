@@ -10,6 +10,7 @@ import cv2
 
 from dataset_benchmark import quad_geometry_metrics, summarize_geometry_metric_rows
 from detect_frame import run_model_detection
+from supervision_utils import resolve_supervision_quad
 
 
 MethodRunner = Callable[[str], dict[str, Any] | None]
@@ -20,7 +21,7 @@ def _summary_from_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
 
 
 def _candidate_metrics(page: dict[str, Any], method: str) -> list[dict[str, float]]:
-    manual_quad = page.get("manualQuad")
+    manual_quad, _ = resolve_supervision_quad(page)
     if not manual_quad:
         return []
     metrics_list: list[dict[str, float]] = []
@@ -45,7 +46,7 @@ def benchmark_project(
 
     pages = 0
     for page in data.get("pages", []):
-        manual_quad = page.get("manualQuad")
+        manual_quad, _ = resolve_supervision_quad(page)
         image_path = page.get("path")
         if not manual_quad or not image_path:
             continue

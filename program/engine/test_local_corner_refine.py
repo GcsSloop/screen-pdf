@@ -16,6 +16,7 @@ from local_corner_refine import (
     build_local_corner_patch_sample,
     build_patch_features,
     export_local_corner_patch_dataset,
+    export_local_corner_patch_dataset_from_splits,
     refine_quad_with_residual_predictor,
 )
 
@@ -130,6 +131,51 @@ class LocalCornerRefineTests(unittest.TestCase):
         self.assertEqual(sample["predicted_quad"][0], [20.0, 20.0])
         self.assertIn("target_point_norm", sample)
 
+    def test_export_local_corner_patch_dataset_supports_selected_candidate_manual_quad(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "demo"
+            project_dir.mkdir(parents=True)
+            image = np.zeros((120, 180, 3), dtype=np.uint8)
+            image_path = project_dir / "IMG_0009.jpg"
+            cv2.imwrite(str(image_path), image)
+            project = {
+                "pages": [
+                    {
+                        "id": "IMG_0009",
+                        "path": str(image_path),
+                        "status": "reviewed",
+                        "selectedCandidateIndex": 0,
+                        "activeQuad": [[20, 20], [160, 20], [160, 100], [20, 100]],
+                        "manualQuad": None,
+                        "candidates": [
+                            {
+                                "method": "teacher_current",
+                                "source": "runtime_teacher",
+                                "modelId": "r66",
+                                "quad": [[20, 20], [160, 20], [160, 100], [20, 100]],
+                                "manualQuad": [[24, 24], [160, 20], [160, 100], [20, 100]],
+                            }
+                        ],
+                    }
+                ]
+            }
+            (project_dir / "screen-pdf-project.json").write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+            output_dir = root / "local-patch"
+
+            summary = export_local_corner_patch_dataset(
+                dataset_root=root,
+                output_dir=output_dir,
+                seed=7,
+                test_ratio=0.0,
+                patch_size=64,
+            )
+
+            row = json.loads((output_dir / "train.jsonl").read_text(encoding="utf-8").splitlines()[0])
+
+        self.assertEqual(summary["page_count"], 1)
+        self.assertEqual(row["manual_quad"][0], [24.0, 24.0])
+
     def test_export_local_corner_patch_dataset_computes_exact_target_point_norm_when_patch_is_clipped(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -164,6 +210,43 @@ class LocalCornerRefineTests(unittest.TestCase):
         self.assertEqual(row["patch"]["x"], 0)
         self.assertEqual(row["patch"]["y"], 0)
         self.assertEqual(row["target_point_norm"], [18 / 64, 20 / 64])
+
+    def test_export_local_corner_patch_dataset_from_splits_allows_predicted_quad_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((120, 180, 3), dtype=np.uint8)
+            image_path = root / "IMG_0003.jpg"
+            cv2.imwrite(str(image_path), image)
+            split_pages = {
+                "train": [
+                    {
+                        "project_name": "demo",
+                        "project_path": str(root / "screen-pdf-project.json"),
+                        "page_id": "IMG_0003",
+                        "image_path": str(image_path),
+                        "manual_quad": [[24, 24], [160, 20], [160, 100], [20, 100]],
+                        "active_quad": [[20, 20], [160, 20], [160, 100], [20, 100]],
+                    }
+                ],
+                "test": [],
+                "holdout": [],
+            }
+            output_dir = root / "local-patch"
+
+            summary = export_local_corner_patch_dataset_from_splits(
+                split_pages=split_pages,
+                output_dir=output_dir,
+                predicted_quad_getter=lambda page: np.array([[30, 30], [150, 20], [160, 96], [24, 104]], dtype=np.float32),
+                patch_size=64,
+            )
+
+            lines = (output_dir / "train.jsonl").read_text(encoding="utf-8").strip().splitlines()
+            sample = json.loads(lines[0])
+
+        self.assertEqual(summary["train_pages"], 1)
+        self.assertEqual(summary["holdout_pages"], 0)
+        self.assertEqual(sample["predicted_quad"][0], [30.0, 30.0])
+        self.assertEqual(sample["manual_quad"][0], [24.0, 24.0])
 
     def test_build_local_corner_patch_sample_allows_large_residual_range(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

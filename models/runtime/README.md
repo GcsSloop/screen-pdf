@@ -14,9 +14,9 @@
 
 - `deep_screen_r1_2026_03_28`
 - app 版本：`0.2.0`
-- coarse：`r44`
-- roi：`c03`
-- local：`r41`
+- coarse：`r66`
+- roi：`c12`
+- local：`r48`
 
 ## 统一蒸馏模型
 

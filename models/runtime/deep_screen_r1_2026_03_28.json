@@ -11,40 +11,47 @@
   "models": {
     "global": {
       "runtime_file": "models/runtime/global_corner_model.pt",
-      "runtime_sha1": "0c055264a18ae56ececf32f731c39baba81abde7",
-      "source_checkpoint": "training/runs/global_corner_r44_202603_single_roi_light_pullback_from_r42e001_v1/output/checkpoints/epoch_001.pt",
-      "model_id": "r44_epoch_001"
+      "runtime_sha1": "a0052ef23b3f823add754452c0c703146f0c62f3",
+      "source_checkpoint": "training/runs/global_corner_r66_202603_old4_hardpages_from_r63_v1/output/global_corner_model.pt",
+      "model_id": "r66"
     },
     "roi": {
       "runtime_file": "models/runtime/corner_heatmap_model.pt",
-      "runtime_sha1": "1e22490e153215dba2fa5faff7cf4427858ebece",
-      "source_checkpoint": "training/runs/roi_corner_c03_202603_r44_guard_light_from_runtime_v1/output/corner_heatmap_model.pt",
-      "model_id": "c03"
+      "runtime_sha1": "2717cdfed0978ded74777bdf53b4cddcf37a1df1",
+      "source_checkpoint": "training/runs/roi_corner_c12_202603_fuzhou_zhouming_replay_from_r60_v1/output/corner_heatmap_model.pt",
+      "model_id": "c12"
     },
     "local": {
       "runtime_file": "models/runtime/local_corner_moe_coord_model.pt",
-      "runtime_sha1": "74eb0fafb8bcd38b3c0fc59576c5572a295a8159",
-      "source_checkpoint": "training/runs/local_corner_r41_202603_targeted_replay_from_r40_v1/output/local_corner_moe_coord_model.pt",
-      "model_id": "r41"
+      "runtime_sha1": "35c3eef881947ba1a487099a8315126403a7a0dc",
+      "source_checkpoint": "training/runs/local_corner_r48_202603_openatom_runtime288_inferenceonly_from_r44_v1/output/local_corner_moe_coord_model.pt",
+      "model_id": "r48"
     }
   },
   "validation_summary": {
-    "broad_full_686": {
-      "point_error_mean": 0.0053,
-      "point_le_0_01_ratio": 0.8918,
-      "point_le_0_05_ratio": 0.9971,
-      "max_corner_le_0_03_ratio": 0.8892
+    "broad_all_787": {
+      "point_error_mean": 0.0078,
+      "point_le_0_01_ratio": 0.8812,
+      "point_le_0_05_ratio": 0.9822,
+      "max_corner_le_0_03_ratio": 0.8971
     },
-    "same_site_wo_extremes": {
-      "point_le_0_01_ratio": 0.8542
+    "broad_non_focus_754": {
+      "point_error_mean": 0.008,
+      "point_le_0_01_ratio": 0.8773,
+      "point_le_0_05_ratio": 0.9814,
+      "max_corner_le_0_03_ratio": 0.8939
     },
-    "r41_holdout_all": {
-      "point_le_0_01_ratio": 0.8494
+    "focus_test_9": {
+      "point_error_mean": 0.0034,
+      "point_le_0_01_ratio": 0.9722,
+      "point_le_0_05_ratio": 1.0,
+      "max_corner_le_0_03_ratio": 1.0
     }
   },
   "references": {
-    "broad_full_report": "training/reports/2026-03-28-r44-vs-r47-c03-r41-broad-full.json",
-    "mini_grid_report": "training/reports/2026-03-28-r44-r47-roi-local-mini-grid.json"
+    "runtime_best_report": "training/reports/2026-03-29-broad-old-plus-fuzhou-r66-balanced.json",
+    "candidate_reject_report_r67": "training/reports/2026-03-29-broad-old-plus-fuzhou-r67-balanced.json",
+    "candidate_reject_report_r68": "training/reports/2026-03-29-broad-old-plus-fuzhou-r68-balanced.json"
   },
-  "notes": "Pinned runtime release based on the current best three-stage stack. The runtime still loads the flat compatibility filenames in models/runtime; this manifest binds those files to the promoted release name deep_screen_r1_2026_03_28."
+  "notes": "Pinned runtime release to the current best three-stage stack for the real teacher_current flow: r66 coarse + c12 ROI + r48 local. Runtime still loads the flat compatibility filenames in models/runtime; this manifest binds those files to the promoted release name deep_screen_r1_2026_03_28."
 }
