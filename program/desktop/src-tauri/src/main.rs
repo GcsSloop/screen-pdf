@@ -88,6 +88,8 @@ struct PageDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectFile {
     version: u32,
+    #[serde(rename = "dataStructureVersion", default)]
+    data_structure_version: Option<u32>,
     name: String,
     #[serde(rename = "sourceDir")]
     source_dir: String,
@@ -105,6 +107,8 @@ struct ProjectFile {
     tag_summary: Option<serde_json::Value>,
     pages: Vec<PageRecord>,
 }
+
+const CURRENT_DATA_STRUCTURE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "snake_case", deserialize = "camelCase"))]
@@ -966,6 +970,7 @@ fn build_project(app: &AppHandle, folder_path: &Path, scan_id: u64) -> Result<Pr
 
     Ok(ProjectFile {
         version: 1,
+        data_structure_version: Some(CURRENT_DATA_STRUCTURE_VERSION),
         name: project_name,
         source_dir: folder_path.to_string_lossy().to_string(),
         project_path: None,
@@ -976,6 +981,29 @@ fn build_project(app: &AppHandle, folder_path: &Path, scan_id: u64) -> Result<Pr
         tag_summary: None,
         pages,
     })
+}
+
+fn infer_data_structure_version(project: &ProjectFile) -> u32 {
+    if let Some(version) = project.data_structure_version {
+        if version > 0 {
+            return version;
+        }
+    }
+    if project
+        .pages
+        .iter()
+        .any(|page| page.manual_quad.as_ref().is_some_and(|quad| !quad.is_empty()))
+    {
+        return 1;
+    }
+    if project.pages.iter().any(|page| {
+        page.candidates
+            .iter()
+            .any(|candidate| candidate.manual_quad.as_ref().is_some_and(|quad| !quad.is_empty()))
+    }) {
+        return CURRENT_DATA_STRUCTURE_VERSION;
+    }
+    CURRENT_DATA_STRUCTURE_VERSION
 }
 
 fn preferred_project_file_in_dir(_folder_path: &Path) -> Option<PathBuf> {
@@ -993,6 +1021,7 @@ fn load_project_file(project_path: &Path) -> Result<ProjectFile> {
             page.thumb_path = generate_thumbnail(Path::new(&page.path));
         }
     }
+    project.data_structure_version = Some(infer_data_structure_version(&project));
     project.project_path = Some(project_path.to_string_lossy().to_string());
     Ok(project)
 }
@@ -1011,6 +1040,7 @@ async fn cancel_scan() -> Result<(), String> {
 #[tauri::command]
 async fn save_project(project_path: String, project: ProjectFile) -> Result<String, String> {
     let mut updated = project;
+    updated.data_structure_version = Some(CURRENT_DATA_STRUCTURE_VERSION);
     updated.project_path = Some(project_path.clone());
     let content = serde_json::to_string_pretty(&updated).map_err(|err| err.to_string())?;
     fs::write(&project_path, content).map_err(|err| err.to_string())?;
@@ -1092,6 +1122,7 @@ mod tests {
         let page = sample_page("page-1", "reviewed", 0.9);
         let project = ProjectFile {
             version: 1,
+            data_structure_version: Some(2),
             name: "demo".to_string(),
             source_dir: "/tmp/demo".to_string(),
             project_path: None,
@@ -1112,6 +1143,130 @@ mod tests {
 
         let decoded: ProjectFile = serde_json::from_value(value).expect("deserialize project");
         assert_eq!(decoded.pages[0].manual_base_candidate_index, Some(0));
+        assert_eq!(decoded.data_structure_version, Some(2));
+    }
+
+    #[test]
+    fn project_round_trips_data_structure_version() {
+        let project = ProjectFile {
+            version: 1,
+            data_structure_version: Some(2),
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![sample_page("page-1", "reviewed", 0.9)],
+        };
+
+        let value = serde_json::to_value(&project).expect("serialize project");
+        assert_eq!(value["dataStructureVersion"], 2);
+
+        let decoded: ProjectFile = serde_json::from_value(value).expect("deserialize project");
+        assert_eq!(decoded.data_structure_version, Some(2));
+    }
+
+    #[test]
+    fn infer_data_structure_version_returns_legacy_when_page_manual_quad_exists() {
+        let mut project = ProjectFile {
+            version: 1,
+            data_structure_version: None,
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![sample_page("page-1", "reviewed", 0.9)],
+        };
+        project.pages[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
+
+        assert_eq!(infer_data_structure_version(&project), 1);
+    }
+
+    #[test]
+    fn infer_data_structure_version_returns_current_when_candidate_manual_quad_exists() {
+        let mut project = ProjectFile {
+            version: 1,
+            data_structure_version: None,
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![sample_page("page-1", "reviewed", 0.9)],
+        };
+        project.pages[0].candidates[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
+
+        assert_eq!(infer_data_structure_version(&project), CURRENT_DATA_STRUCTURE_VERSION);
+    }
+
+    #[test]
+    fn infer_data_structure_version_prefers_explicit_version_when_present() {
+        let mut project = ProjectFile {
+            version: 1,
+            data_structure_version: Some(CURRENT_DATA_STRUCTURE_VERSION),
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![sample_page("page-1", "reviewed", 0.9)],
+        };
+        project.pages[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
+
+        assert_eq!(infer_data_structure_version(&project), CURRENT_DATA_STRUCTURE_VERSION);
+    }
+
+    #[test]
+    fn infer_data_structure_version_defaults_to_current_when_manual_fields_are_absent() {
+        let project = ProjectFile {
+            version: 1,
+            data_structure_version: None,
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![sample_page("page-1", "reviewed", 0.9)],
+        };
+
+        assert_eq!(infer_data_structure_version(&project), CURRENT_DATA_STRUCTURE_VERSION);
+    }
+
+    #[test]
+    fn infer_data_structure_version_prefers_legacy_when_missing_version_and_both_manual_shapes_exist() {
+        let mut project = ProjectFile {
+            version: 1,
+            data_structure_version: None,
+            name: "demo".to_string(),
+            source_dir: "/tmp/demo".to_string(),
+            project_path: None,
+            selected_page_id: Some("page-1".to_string()),
+            event_slug: None,
+            event_name: None,
+            tag_version: None,
+            tag_summary: None,
+            pages: vec![sample_page("page-1", "reviewed", 0.9)],
+        };
+        project.pages[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
+        project.pages[0].candidates[0].manual_quad = Some(vec![[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0]]);
+
+        assert_eq!(infer_data_structure_version(&project), 1);
     }
 
     #[test]

@@ -57,6 +57,7 @@ export const TOOLBAR_ICON_BUTTONS: ToolbarIconButton[] = [
 
 export const MAGNIFIER_SIZE = 144;
 export const MAGNIFIER_OFFSET = 20;
+export const MAGNIFIER_HOVER_DELAY_MS = 500;
 const MAGNIFIER_MARGIN = 12;
 
 type StageSize = {
@@ -179,4 +180,8 @@ export function resolveMagnifierPlacement({
 
 export function renderToolbarIcon(icon: string): string {
   return TOOLBAR_ICON_SVGS[icon] ?? TOOLBAR_ICON_SVGS.folder;
+}
+
+export function resolveMagnifierHandle(activeHandle: number | null, hoverHandle: number | null): number | null {
+  return activeHandle ?? hoverHandle;
 }

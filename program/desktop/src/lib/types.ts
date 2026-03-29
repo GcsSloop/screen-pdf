@@ -58,6 +58,7 @@ export interface PageRecord {
 
 export interface ProjectFile {
   version: number;
+  dataStructureVersion?: number | null;
   name: string;
   sourceDir: string;
   projectPath?: string | null;

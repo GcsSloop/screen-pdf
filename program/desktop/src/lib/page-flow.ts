@@ -1,8 +1,10 @@
 import type { PageRecord, Point } from "./types";
 import {
   getEffectiveCandidateQuad,
+  normalizeProjectDataStructure as normalizeProjectDataStructureImpl,
   withCandidateManualOverride
 } from "./candidate-overrides";
+import type { ProjectFile } from "./types";
 
 export function movePage(pages: PageRecord[], draggedId: string, targetId: string): PageRecord[] {
   const next = [...pages];
@@ -50,6 +52,10 @@ export function applyDraftQuadToPage(page: PageRecord, draftQuad: Point[]): Page
     activeQuad: draftQuad.map((point) => [...point]) as Point[],
     status: "reviewed"
   };
+}
+
+export function normalizeProjectDataStructure(project: ProjectFile): ProjectFile {
+  return normalizeProjectDataStructureImpl(project);
 }
 
 export function buildPreviewVersionedPath(path: string, version: number): string {

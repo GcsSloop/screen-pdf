@@ -3,9 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   clearCandidateManualOverride,
   getEffectiveCandidateQuad,
+  inferProjectDataStructureVersion,
   migrateLegacyManualOverride
 } from "./candidate-overrides";
-import type { Candidate, PageRecord, Point } from "./types";
+import type { Candidate, PageRecord, Point, ProjectFile } from "./types";
 
 function candidate(method: string, quad: Point[], overrides: Partial<Candidate> = {}): Candidate {
   return {
@@ -60,6 +61,19 @@ function page(): PageRecord {
       createdAt: "2026-03-21 10:00:00",
       modifiedAt: "2026-03-21 10:00:00"
     }
+  };
+}
+
+function project(overrides: Partial<ProjectFile> = {}): ProjectFile {
+  return {
+    version: 1,
+    dataStructureVersion: null,
+    name: "demo",
+    sourceDir: "/tmp/demo",
+    projectPath: null,
+    selectedPageId: "p1",
+    pages: [page()],
+    ...overrides
   };
 }
 
@@ -128,5 +142,92 @@ describe("candidate overrides", () => {
       [97, 97],
       [2, 98]
     ]);
+  });
+
+  it("infers legacy structure when version is missing and page-level manual quad exists", () => {
+    const legacyPage = page();
+    legacyPage.manualQuad = [
+      [3, 2],
+      [98, 1],
+      [97, 97],
+      [2, 98]
+    ];
+
+    expect(inferProjectDataStructureVersion(project({ pages: [legacyPage] }))).toBe(1);
+  });
+
+  it("infers new structure when version is missing and candidate-level manual quad exists", () => {
+    const modernPage = page();
+    modernPage.candidates[0] = candidate(
+      "r66",
+      [
+        [0, 0],
+        [100, 0],
+        [100, 100],
+        [0, 100]
+      ],
+      {
+        manualQuad: [
+          [4, 4],
+          [96, 4],
+          [96, 96],
+          [4, 96]
+        ]
+      }
+    );
+
+    expect(inferProjectDataStructureVersion(project({ pages: [modernPage] }))).toBe(2);
+  });
+
+  it("prefers the explicit data structure version when present", () => {
+    const legacyPage = page();
+    legacyPage.manualQuad = [
+      [3, 2],
+      [98, 1],
+      [97, 97],
+      [2, 98]
+    ];
+
+    expect(
+      inferProjectDataStructureVersion(
+        project({
+          dataStructureVersion: 2,
+          pages: [legacyPage]
+        })
+      )
+    ).toBe(2);
+  });
+
+  it("defaults to the current structure when version is missing and no manual fields exist", () => {
+    expect(inferProjectDataStructureVersion(project())).toBe(2);
+  });
+
+  it("treats mixed missing-version projects as legacy when page-level manual data still exists", () => {
+    const mixedPage = page();
+    mixedPage.manualQuad = [
+      [3, 2],
+      [98, 1],
+      [97, 97],
+      [2, 98]
+    ];
+    mixedPage.candidates[1] = candidate(
+      "v28",
+      [
+        [2, 1],
+        [99, 0],
+        [98, 98],
+        [1, 99]
+      ],
+      {
+        manualQuad: [
+          [4, 3],
+          [97, 2],
+          [96, 96],
+          [3, 97]
+        ]
+      }
+    );
+
+    expect(inferProjectDataStructureVersion(project({ pages: [mixedPage] }))).toBe(1);
   });
 });
