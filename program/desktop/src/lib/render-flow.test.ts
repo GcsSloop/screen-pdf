@@ -5,7 +5,8 @@ import {
   buildPreviewSourceCandidates,
   buildThumbnailSourceCandidates,
   canCommitPageRender,
-  resolveIntrinsicImageSize
+  resolveIntrinsicImageSize,
+  shouldGeneratePreview
 } from "./render-flow";
 
 describe("render flow", () => {
@@ -47,6 +48,12 @@ describe("render flow", () => {
       "/tmp/source-preview.png",
       "/tmp/source.jpeg"
     ]);
+  });
+
+  it("requires preview regeneration when the cached preview path is missing", () => {
+    expect(shouldGeneratePreview(null)).toBe(true);
+    expect(shouldGeneratePreview(undefined)).toBe(true);
+    expect(shouldGeneratePreview("/tmp/source-preview.png")).toBe(false);
   });
 
   it("rejects stale async render results from previous pages", () => {

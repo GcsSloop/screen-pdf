@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAGNIFIER_HOVER_DELAY_MS,
   MAGNIFIER_SIZE,
   MAGNIFIER_OFFSET,
+  resolveMagnifierHandle,
   resolveMagnifierPlacement,
   TOOLBAR_ICON_BUTTONS
 } from "./editor-ui";
@@ -59,5 +61,12 @@ describe("editor ui helpers", () => {
     expect(placement.anchorY).toBeGreaterThanOrEqual(MAGNIFIER_OFFSET);
     expect(placement.anchorX + MAGNIFIER_SIZE + MAGNIFIER_OFFSET).toBeLessThanOrEqual(260);
     expect(placement.anchorY + MAGNIFIER_SIZE + MAGNIFIER_OFFSET).toBeLessThanOrEqual(260);
+  });
+
+  it("uses a delayed hover magnifier and lets dragging take priority", () => {
+    expect(MAGNIFIER_HOVER_DELAY_MS).toBe(500);
+    expect(resolveMagnifierHandle(2, 1)).toBe(2);
+    expect(resolveMagnifierHandle(null, 1)).toBe(1);
+    expect(resolveMagnifierHandle(null, null)).toBeNull();
   });
 });

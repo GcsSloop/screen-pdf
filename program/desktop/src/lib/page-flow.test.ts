@@ -5,9 +5,10 @@ import {
   applyDraftQuadToPage,
   buildPreviewVersionedPath,
   movePage,
+  normalizeProjectDataStructure,
   resolveWorkingQuad
 } from "./page-flow";
-import type { Candidate, PageRecord, Point } from "./types";
+import type { Candidate, PageRecord, Point, ProjectFile } from "./types";
 
 function candidate(method: string, quad: Point[], overrides: Partial<Candidate> = {}): Candidate {
   return {
@@ -55,6 +56,18 @@ function page(id: string): PageRecord {
       createdAt: "2026-03-21 10:00:00",
       modifiedAt: "2026-03-21 10:00:00"
     }
+  };
+}
+
+function project(pages: PageRecord[]): ProjectFile {
+  return {
+    version: 1,
+    dataStructureVersion: null,
+    name: "demo",
+    sourceDir: "/tmp/demo",
+    projectPath: null,
+    selectedPageId: pages[0]?.id ?? null,
+    pages
   };
 }
 
@@ -124,5 +137,106 @@ describe("page flow", () => {
 
   it("adds a cache buster after preview regeneration", () => {
     expect(buildPreviewVersionedPath("/tmp/a.png", 12)).toBe("/tmp/a.png?v=12");
+  });
+
+  it("normalizes a legacy project into structure version 2 on load", () => {
+    const legacy = page("a");
+    legacy.manualQuad = [
+      [2, 2],
+      [98, 2],
+      [98, 98],
+      [2, 98]
+    ];
+    legacy.manualBaseCandidateIndex = 0;
+
+    const normalized = normalizeProjectDataStructure(project([legacy]));
+
+    expect(normalized.dataStructureVersion).toBe(2);
+    expect(normalized.pages[0]?.manualQuad).toBeNull();
+    expect(normalized.pages[0]?.manualBaseCandidateIndex).toBeNull();
+    expect(normalized.pages[0]?.candidates[0]?.manualQuad).toEqual([
+      [2, 2],
+      [98, 2],
+      [98, 98],
+      [2, 98]
+    ]);
+  });
+
+  it("normalizes a missing-version new-structure project without altering candidate manual data", () => {
+    const modern = page("a");
+    modern.candidates[0] = {
+      ...modern.candidates[0],
+      manualQuad: [
+        [3, 3],
+        [97, 3],
+        [97, 97],
+        [3, 97]
+      ]
+    };
+
+    const normalized = normalizeProjectDataStructure(project([modern]));
+
+    expect(normalized.dataStructureVersion).toBe(2);
+    expect(normalized.pages[0]?.manualQuad).toBeNull();
+    expect(normalized.pages[0]?.candidates[0]?.manualQuad).toEqual([
+      [3, 3],
+      [97, 3],
+      [97, 97],
+      [3, 97]
+    ]);
+  });
+
+  it("normalizes an explicit v1 project into v2 candidate-level manual data", () => {
+    const legacy = page("a");
+    legacy.manualQuad = [
+      [2, 2],
+      [98, 2],
+      [98, 98],
+      [2, 98]
+    ];
+
+    const normalized = normalizeProjectDataStructure(
+      {
+        ...project([legacy]),
+        dataStructureVersion: 1
+      }
+    );
+
+    expect(normalized.dataStructureVersion).toBe(2);
+    expect(normalized.pages[0]?.manualQuad).toBeNull();
+    expect(normalized.pages[0]?.candidates[0]?.manualQuad).toEqual([
+      [2, 2],
+      [98, 2],
+      [98, 98],
+      [2, 98]
+    ]);
+  });
+
+  it("keeps explicit v2 projects stable during normalization", () => {
+    const modern = page("a");
+    modern.candidates[0] = {
+      ...modern.candidates[0],
+      manualQuad: [
+        [3, 3],
+        [97, 3],
+        [97, 97],
+        [3, 97]
+      ]
+    };
+
+    const normalized = normalizeProjectDataStructure(
+      {
+        ...project([modern]),
+        dataStructureVersion: 2
+      }
+    );
+
+    expect(normalized.dataStructureVersion).toBe(2);
+    expect(normalized.pages[0]?.candidates[0]?.manualQuad).toEqual([
+      [3, 3],
+      [97, 3],
+      [97, 97],
+      [3, 97]
+    ]);
   });
 });

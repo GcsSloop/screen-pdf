@@ -7,8 +7,7 @@ import appIconUrl from "../icons/screen-pdf-desktop.png";
 import { buildCandidateDebugLabel, buildCandidateRowMeta, buildCandidateTitle } from "./lib/candidate-display";
 import {
   clearCandidateManualOverride,
-  getEffectiveCandidateQuad,
-  migrateLegacyManualOverride
+  getEffectiveCandidateQuad
 } from "./lib/candidate-overrides";
 
 import {
@@ -36,9 +35,11 @@ import {
   type DisplayGeometry
 } from "./lib/editor-geometry";
 import {
+  MAGNIFIER_HOVER_DELAY_MS,
   MAGNIFIER_SIZE,
   TOOLBAR_ICON_BUTTONS,
   renderToolbarIcon,
+  resolveMagnifierHandle,
   resolveMagnifierPlacement
 } from "./lib/editor-ui";
 import {
@@ -46,6 +47,7 @@ import {
   applyDraftQuadToPage,
   buildPreviewVersionedPath,
   movePage,
+  normalizeProjectDataStructure,
   resolveWorkingQuad
 } from "./lib/page-flow";
 import {
@@ -53,7 +55,8 @@ import {
   buildPreviewSourceCandidates,
   buildThumbnailSourceCandidates,
   canCommitPageRender,
-  resolveIntrinsicImageSize
+  resolveIntrinsicImageSize,
+  shouldGeneratePreview
 } from "./lib/render-flow";
 import { initialState } from "./lib/state";
 import type {
@@ -300,6 +303,8 @@ let displayGeometry: DisplayGeometry = {
 let previewVersion = 0;
 let activeViewRequestId = 0;
 let exportPopoverOpen = false;
+let hoverMagnifierHandle: number | null = null;
+let hoverMagnifierTimer: ReturnType<typeof setTimeout> | null = null;
 let scanUiState: {
   visible: boolean;
   cancellable: boolean;
@@ -327,6 +332,36 @@ function showAppError(message: string) {
 function setPreviewSource(previewPath: string) {
   previewVersion += 1;
   previewImage.src = buildPreviewVersionedPath(convertFileSrc(previewPath), previewVersion);
+}
+
+function clearHoverMagnifierIntent() {
+  if (hoverMagnifierTimer) {
+    clearTimeout(hoverMagnifierTimer);
+    hoverMagnifierTimer = null;
+  }
+}
+
+function hideHoverMagnifier(page?: PageRecord | null) {
+  clearHoverMagnifierIntent();
+  hoverMagnifierHandle = null;
+  if (state.activeHandle === null) {
+    syncEditorOverlay(page ?? getActivePage());
+  }
+}
+
+function queueHoverMagnifier(handleIndex: number, page: PageRecord) {
+  if (state.activeHandle !== null) {
+    return;
+  }
+  clearHoverMagnifierIntent();
+  hoverMagnifierTimer = setTimeout(() => {
+    hoverMagnifierTimer = null;
+    if (state.activeHandle !== null) {
+      return;
+    }
+    hoverMagnifierHandle = handleIndex;
+    syncEditorOverlay(page);
+  }, MAGNIFIER_HOVER_DELAY_MS);
 }
 
 function updatePreviewImage(page: PageRecord) {
@@ -468,7 +503,9 @@ function detailsHtml(page: PageRecord): string {
 }
 
 function setProject(project: ProjectFile) {
-  project.pages = project.pages.map((page) => migrateLegacyManualOverride(page));
+  clearHoverMagnifierIntent();
+  hoverMagnifierHandle = null;
+  project = normalizeProjectDataStructure(project);
   const activePage = resolveActivePage(project);
   state.activePage = activePage;
   state.project = withSelectedPage(project, activePage?.id ?? null);
@@ -510,6 +547,8 @@ function recomputeTagSummary(project: ProjectFile) {
 }
 
 function resetAppState() {
+  clearHoverMagnifierIntent();
+  hoverMagnifierHandle = null;
   state.project = null;
   state.activePage = null;
   state.activeHandle = null;
@@ -583,6 +622,8 @@ function updatePageFailureTags(page: PageRecord, nextTags: FailureTag[]) {
 
 function setActivePage(pageId: string) {
   if (!state.project) return;
+  clearHoverMagnifierIntent();
+  hoverMagnifierHandle = null;
   const page = state.project.pages.find((item) => item.id === pageId) ?? null;
   state.activePage = page;
   state.project = withSelectedPage(state.project, pageId);
@@ -970,7 +1011,7 @@ async function renderActivePage() {
   if (!commitMatchesActivePage(requestId, page.id)) {
     return;
   }
-  if (page.previewPath || page.path) {
+  if (!shouldGeneratePreview(page.previewPath)) {
     updatePreviewImage(page);
   } else {
     await ensurePreview(page, requestId);
@@ -1025,12 +1066,13 @@ function syncEditorOverlay(page: PageRecord | null) {
     handle.classList.toggle("active", state.activeHandle === index);
   }
 
-  if (state.activeHandle === null) {
+  const magnifierHandle = resolveMagnifierHandle(state.activeHandle, hoverMagnifierHandle);
+  if (magnifierHandle === null) {
     editorMagnifier.classList.add("hidden");
     return;
   }
 
-  const handlePoint = displayQuad[state.activeHandle];
+  const handlePoint = displayQuad[magnifierHandle];
   if (!handlePoint) {
     editorMagnifier.classList.add("hidden");
     return;
@@ -1038,7 +1080,7 @@ function syncEditorOverlay(page: PageRecord | null) {
 
   const placement = resolveMagnifierPlacement({
     point: handlePoint,
-    activeHandle: state.activeHandle,
+    activeHandle: magnifierHandle,
     quad: displayQuad,
     stage: {
       width: displayGeometry.width,
@@ -1204,11 +1246,21 @@ for (const handle of cornerHandles) {
 
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
+    hideHoverMagnifier(page);
     state.dragOrigin = screenToImagePoint(event);
     state.activeHandle = handleIndex;
     state.draftQuad = workingQuad(page).map((entry) => [...entry]) as Point[];
     syncEditorOverlay(page);
     renderPageDetails(page);
+  });
+  handle.addEventListener("pointerenter", () => {
+    const page = getActivePage();
+    const handleIndex = Number(handle.dataset.handleIndex);
+    if (!page || Number.isNaN(handleIndex)) return;
+    queueHoverMagnifier(handleIndex, page);
+  });
+  handle.addEventListener("pointerleave", () => {
+    hideHoverMagnifier(getActivePage());
   });
 }
 

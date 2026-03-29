@@ -37,6 +37,10 @@ export function buildPreviewSourceCandidates(imagePath: string, previewPath?: st
   return buildDisplaySourceCandidates(imagePath, previewPath, true);
 }
 
+export function shouldGeneratePreview(previewPath?: string | null): boolean {
+  return !previewPath;
+}
+
 export function canCommitPageRender(
   requestId: number,
   activeRequestId: number,

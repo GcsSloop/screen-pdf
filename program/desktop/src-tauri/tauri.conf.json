@@ -45,6 +45,7 @@
       "../../engine/local_corner_moe.py",
       "../../engine/local_corner_moe_coord.py",
       "../../engine/deep_screen_v1_model.py",
+      "../../engine/supervision_utils.py",
       "../../engine/train_scoring_profile.py",
       "../../engine/scoring_profile.json",
       "../../engine/opencv_profile.json",
