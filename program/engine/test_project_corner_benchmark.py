@@ -56,6 +56,41 @@ class ProjectCornerBenchmarkTests(unittest.TestCase):
         self.assertIn("perspective_tilt_error_mean", result["summaries"]["active"])
         self.assertIn("quad_inset_ratio_mean", result["summaries"]["active"])
 
+    def test_benchmark_project_uses_selected_candidate_manual_quad_in_new_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "IMG_0002.jpg"
+            image_path.write_bytes(b"fake")
+            project_path = root / "screen-pdf-project.json"
+            project = {
+                "pages": [
+                    {
+                        "id": "IMG_0002",
+                        "path": str(image_path),
+                        "manualQuad": None,
+                        "status": "reviewed",
+                        "selectedCandidateIndex": 0,
+                        "activeQuad": [[20, 20], [120, 20], [120, 100], [20, 100]],
+                        "bestMethod": "teacher_current",
+                        "candidates": [
+                            {
+                                "method": "teacher_current",
+                                "source": "runtime_teacher",
+                                "modelId": "r66",
+                                "manualQuad": [[10, 10], [110, 10], [110, 90], [10, 90]],
+                                "quad": [[20, 20], [120, 20], [120, 100], [20, 100]],
+                            }
+                        ],
+                    }
+                ]
+            }
+            project_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+            result = benchmark_project(project_path, runtime_runner=None)
+
+        self.assertEqual(result["pages"], 1)
+        self.assertIn("active", result["summaries"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -671,6 +671,48 @@ class PerspectiveDetectTests(unittest.TestCase):
         self.assertEqual(samples[0]["selected_method"], "refined_edges")
         self.assertEqual(len(samples[0]["candidates"]), 2)
 
+    def test_load_training_samples_uses_selected_candidate_manual_quad_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_path = Path(temp_dir) / "screen-pdf-project.json"
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            {
+                                "id": "page-1",
+                                "manualQuad": None,
+                                "status": "reviewed",
+                                "activeQuad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                "selectedCandidateIndex": 1,
+                                "candidates": [
+                                    {
+                                        "method": "bright_screen",
+                                        "score": 0.5,
+                                        "quad": [[0, 0], [90, 0], [90, 70], [0, 70]],
+                                        "metrics": {},
+                                    },
+                                    {
+                                        "method": "refined_edges",
+                                        "source": "runtime_teacher",
+                                        "modelId": "r66",
+                                        "score": 0.4,
+                                        "manualQuad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                        "quad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                        "metrics": {},
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            samples = load_training_samples(Path(temp_dir))
+
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["page_id"], "page-1")
+        self.assertEqual(samples[0]["selected_method"], "refined_edges")
+
     def test_load_training_samples_can_rerun_detector_from_image(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

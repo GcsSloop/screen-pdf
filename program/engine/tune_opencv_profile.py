@@ -8,6 +8,7 @@ import itertools
 import random
 
 from perspective_detect import DEFAULT_OPENCV_PROFILE, load_scoring_profile
+from supervision_utils import resolve_manual_quad
 from train_scoring_profile import evaluate_profile_on_samples, load_training_samples
 
 
@@ -67,7 +68,7 @@ def _manual_count(project_root: Path) -> int:
     if not project_path.exists():
         return 0
     data = json.loads(project_path.read_text(encoding="utf-8"))
-    return sum(1 for page in data.get("pages", []) if page.get("manualQuad"))
+    return sum(1 for page in data.get("pages", []) if resolve_manual_quad(page)[0])
 
 
 def _evaluate_roots(

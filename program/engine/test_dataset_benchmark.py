@@ -23,6 +23,7 @@ from dataset_benchmark import (
     quad_geometry_metrics,
     quad_inset_ratio,
     screen_relative_point_error,
+    summarize_geometry_metric_rows,
 )
 
 
@@ -79,6 +80,21 @@ class DatasetBenchmarkTests(unittest.TestCase):
         self.assertIn("perspective_tilt_error", metrics)
         self.assertIn("quad_inset_ratio", metrics)
         self.assertGreater(metrics["perspective_tilt_error"], 0.0)
+
+    def test_summary_uses_per_corner_point_le_0_01_ratio_and_max_corner_le_0_03_ratio(self) -> None:
+        manual = [[0, 0], [100, 0], [100, 100], [0, 100]]
+        almost_good = [[0, 0], [100, 0], [102, 100], [0, 100]]
+        one_corner_too_far = [[0, 0], [100, 0], [105, 100], [0, 100]]
+
+        summary = summarize_geometry_metric_rows(
+            [
+                quad_geometry_metrics(manual, almost_good),
+                quad_geometry_metrics(manual, one_corner_too_far),
+            ]
+        )
+
+        self.assertEqual(summary["point_le_0_01_ratio"], 0.75)
+        self.assertEqual(summary["max_corner_le_0_03_ratio"], 0.5)
 
     def test_compute_scene_profile_detects_near_color_background(self) -> None:
         image = np.full((120, 180, 3), 140, dtype=np.uint8)
@@ -144,6 +160,125 @@ class DatasetBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0]["page_id"], "page-1")
+
+    def test_load_manual_pages_includes_reviewed_non_model_active_quad_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "project-a"
+            project_dir.mkdir()
+            image = np.zeros((100, 120, 3), dtype=np.uint8)
+            image_path = project_dir / "page-1.jpg"
+            cv2.imwrite(str(image_path), image)
+            project_path = project_dir / "screen-pdf-project.json"
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            {
+                                "id": "page-1",
+                                "path": "page-1.jpg",
+                                "status": "reviewed",
+                                "manualQuad": None,
+                                "activeQuad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                "selectedCandidateIndex": 0,
+                                "candidates": [
+                                    {
+                                        "method": "document_quad",
+                                        "source": "opencv",
+                                        "quad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            pages = load_manual_pages(root)
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["manual_quad"], [[0, 0], [100, 0], [100, 80], [0, 80]])
+
+    def test_load_manual_pages_includes_selected_candidate_manual_quad_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "project-a"
+            project_dir.mkdir()
+            image = np.zeros((100, 120, 3), dtype=np.uint8)
+            image_path = project_dir / "page-1.jpg"
+            cv2.imwrite(str(image_path), image)
+            project_path = project_dir / "screen-pdf-project.json"
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            {
+                                "id": "page-1",
+                                "path": "page-1.jpg",
+                                "status": "reviewed",
+                                "manualQuad": None,
+                                "activeQuad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                "selectedCandidateIndex": 0,
+                                "candidates": [
+                                    {
+                                        "method": "teacher_current",
+                                        "source": "runtime_teacher",
+                                        "modelId": "r66",
+                                        "manualQuad": [[1, 1], [99, 1], [99, 79], [1, 79]],
+                                        "quad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            pages = load_manual_pages(root)
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["manual_quad"], [[1, 1], [99, 1], [99, 79], [1, 79]])
+
+    def test_load_manual_pages_excludes_model_selected_active_quad_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_dir = root / "project-a"
+            project_dir.mkdir()
+            image = np.zeros((100, 120, 3), dtype=np.uint8)
+            image_path = project_dir / "page-1.jpg"
+            cv2.imwrite(str(image_path), image)
+            project_path = project_dir / "screen-pdf-project.json"
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "pages": [
+                            {
+                                "id": "page-1",
+                                "path": "page-1.jpg",
+                                "status": "reviewed",
+                                "manualQuad": None,
+                                "activeQuad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                "selectedCandidateIndex": 0,
+                                "candidates": [
+                                    {
+                                        "method": "teacher_current",
+                                        "source": "runtime_teacher",
+                                        "modelId": "r57e001",
+                                        "quad": [[0, 0], [100, 0], [100, 80], [0, 80]],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            pages = load_manual_pages(root)
+
+        self.assertEqual(pages, [])
 
     def test_build_split_keeps_every_project_in_test_when_possible(self) -> None:
         pages = [

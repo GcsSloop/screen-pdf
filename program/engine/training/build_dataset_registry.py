@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from supervision_utils import resolve_manual_quad
+
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".webp"}
 
@@ -81,6 +83,8 @@ def safe_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def create_or_refresh_symlink(link_path: Path, target_path: Path) -> None:
+    if link_path.resolve() == target_path.resolve():
+        return
     if link_path.is_symlink() or link_path.exists():
         if link_path.is_symlink() and Path(os.readlink(link_path)).resolve() == target_path.resolve():
             return
@@ -202,9 +206,10 @@ def main() -> int:
             status_counts[status] += 1
             best_method = page.get("bestMethod") or "unknown"
             best_method_counts[best_method] += 1
+            manual_quad, manual_source = resolve_manual_quad(page)
             if status == "reviewed":
                 project_reviewed_pages += 1
-            if page.get("manualQuad"):
+            if manual_quad:
                 project_manual_pages += 1
             if page.get("previewPath"):
                 pages_with_export_preview += 1
@@ -224,9 +229,11 @@ def main() -> int:
                     "best_method": best_method,
                     "selected_candidate_index": page.get("selectedCandidateIndex"),
                     "candidate_count": normalize_candidate_count(page),
-                    "manual_quad": page.get("manualQuad"),
+                    "manual_quad": manual_quad,
+                    "manual_source": manual_source,
+                    "original_manual_quad": page.get("manualQuad"),
                     "active_quad": page.get("activeQuad"),
-                    "has_manual_quad": bool(page.get("manualQuad")),
+                    "has_manual_quad": bool(manual_quad),
                     "details": page.get("details") or {},
                 }
             )

@@ -14,6 +14,7 @@ import numpy as np
 
 from perspective_detect import detect_best_candidate_with_profile, load_opencv_profile
 from perspective_detect import order_points
+from supervision_utils import resolve_supervision_quad
 from train_scoring_profile import quad_iou
 
 
@@ -140,6 +141,20 @@ def normalized_point_error(
     return float(np.mean(distances) / diag)
 
 
+def normalized_corner_errors(
+    manual_quad: list[list[float]] | np.ndarray,
+    predicted_quad: list[list[float]] | np.ndarray,
+) -> np.ndarray:
+    manual = _ordered_quad(manual_quad)
+    predicted = _ordered_quad(predicted_quad)
+    bbox = np.ptp(manual, axis=0)
+    diag = float(np.hypot(max(float(bbox[0]), 1.0), max(float(bbox[1]), 1.0)))
+    if diag <= 1e-6:
+        return np.zeros((4,), dtype=np.float32)
+    distances = np.linalg.norm(predicted - manual, axis=1)
+    return (distances / diag).astype(np.float32)
+
+
 def screen_relative_point_error(
     manual_quad: list[list[float]] | np.ndarray,
     predicted_quad: list[list[float]] | np.ndarray,
@@ -189,8 +204,13 @@ def quad_geometry_metrics(
     manual_quad: list[list[float]] | np.ndarray,
     predicted_quad: list[list[float]] | np.ndarray,
 ) -> dict[str, float]:
+    corner_errors = normalized_corner_errors(manual_quad, predicted_quad)
     return {
-        "point_error": normalized_point_error(manual_quad, predicted_quad),
+        "point_error": float(corner_errors.mean()),
+        "corner_error_00": float(corner_errors[0]),
+        "corner_error_01": float(corner_errors[1]),
+        "corner_error_02": float(corner_errors[2]),
+        "corner_error_03": float(corner_errors[3]),
         "screen_relative_point_error": screen_relative_point_error(manual_quad, predicted_quad),
         "max_corner_error": max_corner_error(manual_quad, predicted_quad),
         "perspective_tilt_error": perspective_tilt_error(manual_quad, predicted_quad),
@@ -215,6 +235,7 @@ def summarize_geometry_metric_rows(rows: list[dict[str, float]]) -> dict[str, fl
             "max_corner_error_mean": 0.0,
             "max_corner_error_max": 0.0,
             "max_corner_error_p95": 0.0,
+            "max_corner_le_0_03_ratio": 0.0,
             "max_corner_le_0_01_ratio": 0.0,
             "perspective_tilt_error_mean": 0.0,
             "perspective_tilt_error_p95": 0.0,
@@ -227,6 +248,14 @@ def summarize_geometry_metric_rows(rows: list[dict[str, float]]) -> dict[str, fl
     max_corner_errors = np.array([float(row["max_corner_error"]) for row in rows], dtype=np.float32)
     tilt_errors = np.array([float(row["perspective_tilt_error"]) for row in rows], dtype=np.float32)
     inset_ratios = np.array([float(row["quad_inset_ratio"]) for row in rows], dtype=np.float32)
+    corner_errors = np.array(
+        [
+            float(row[f"corner_error_{index:02d}"])
+            for row in rows
+            for index in range(4)
+        ],
+        dtype=np.float32,
+    )
     return {
         "pages": len(rows),
         "point_error_mean": round(float(point_errors.mean()), 4),
@@ -235,13 +264,14 @@ def summarize_geometry_metric_rows(rows: list[dict[str, float]]) -> dict[str, fl
         "point_le_0_05_ratio": round(float((point_errors <= 0.05).mean()), 4),
         "point_le_0_03_ratio": round(float((point_errors <= 0.03).mean()), 4),
         "point_le_0_02_ratio": round(float((point_errors <= 0.02).mean()), 4),
-        "point_le_0_01_ratio": round(float((point_errors <= 0.01).mean()), 4),
+        "point_le_0_01_ratio": round(float((corner_errors <= 0.01).mean()), 4),
         "screen_relative_error_mean": round(float(screen_errors.mean()), 4),
         "screen_relative_error_max": round(float(screen_errors.max()), 4),
         "screen_relative_error_p95": round(float(np.percentile(screen_errors, 95)), 4),
         "max_corner_error_mean": round(float(max_corner_errors.mean()), 4),
         "max_corner_error_max": round(float(max_corner_errors.max()), 4),
         "max_corner_error_p95": round(float(np.percentile(max_corner_errors, 95)), 4),
+        "max_corner_le_0_03_ratio": round(float((max_corner_errors <= 0.03).mean()), 4),
         "max_corner_le_0_01_ratio": round(float((max_corner_errors <= 0.01).mean()), 4),
         "perspective_tilt_error_mean": round(float(tilt_errors.mean()), 4),
         "perspective_tilt_error_p95": round(float(np.percentile(tilt_errors, 95)), 4),
@@ -277,7 +307,7 @@ def load_manual_pages(dataset_root: Path) -> list[PageRecord]:
     for project_path in sorted(dataset_root.rglob("screen-pdf-project.json")):
         data = json.loads(project_path.read_text(encoding="utf-8"))
         for page in data.get("pages", []):
-            manual_quad = page.get("manualQuad")
+            manual_quad, _ = resolve_supervision_quad(page)
             if not manual_quad:
                 continue
             image_path = _resolve_image_path(project_path, page)

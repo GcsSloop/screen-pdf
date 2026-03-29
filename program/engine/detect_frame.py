@@ -17,6 +17,8 @@ from pypdf import PdfWriter
 from perspective_detect import detect_best_candidate
 
 _MODEL_RUNTIME: dict[str, object] | None = None
+_DEEP_SCREEN_V1_RUNTIME: dict[str, object] | None = None
+_RUNTIME_RELEASE_MODEL_ID: str | None = None
 
 
 def to_plain_candidate(candidate: dict) -> dict:
@@ -28,6 +30,9 @@ def to_plain_candidate(candidate: dict) -> dict:
             for key, value in candidate["metrics"].items()
         },
         "quad": [[float(x), float(y)] for x, y in candidate["quad"]],
+        "source": str(candidate.get("source", "opencv")),
+        "modelId": str(candidate.get("modelId", candidate.get("model_id", candidate["method"]))),
+        "debugOnly": bool(candidate.get("debugOnly", candidate.get("debug_only", False))),
     }
 
 
@@ -231,6 +236,28 @@ def _model_path(name: str) -> Path:
     return _model_root() / name
 
 
+def runtime_release_model_id() -> str:
+    global _RUNTIME_RELEASE_MODEL_ID
+    if _RUNTIME_RELEASE_MODEL_ID is not None:
+        return _RUNTIME_RELEASE_MODEL_ID
+
+    model_root = _model_root()
+    for manifest_path in sorted(model_root.glob("*.json")):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        public_name = str(payload.get("public_name", "")).strip()
+        if not public_name:
+            continue
+        if str(payload.get("status", "")).strip().lower() == "promoted":
+            _RUNTIME_RELEASE_MODEL_ID = public_name
+            return _RUNTIME_RELEASE_MODEL_ID
+
+    _RUNTIME_RELEASE_MODEL_ID = "teacher_current"
+    return _RUNTIME_RELEASE_MODEL_ID
+
+
 def local_model_path() -> Path | None:
     preferred_names = [
         "local_corner_moe_coord_model.pt",
@@ -247,12 +274,28 @@ def model_detection_enabled() -> bool:
     return os.environ.get("SCREEN_PDF_DISABLE_MODEL", "").strip().lower() not in {"1", "true", "yes"}
 
 
+def dual_model_debug_enabled() -> bool:
+    return os.environ.get("SCREEN_PDF_DEBUG_DUAL_MODEL", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _model_files_exist() -> bool:
     return _model_path("global_corner_model.pt").exists() and _model_path("corner_heatmap_model.pt").exists()
 
 
 def _local_model_exists() -> bool:
     return local_model_path() is not None
+
+
+def deep_screen_v1_model_path() -> Path | None:
+    override = os.environ.get("SCREEN_PDF_DEEP_SCREEN_V1_MODEL", "").strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+        return path if path.exists() else None
+    for name in ("deep_screen_v1_debug.pt", "deep_screen_v1.pt", "deep_screen_v1_round_022_student.pt"):
+        path = _model_path(name)
+        if path.exists():
+            return path
+    return None
 
 
 def _get_model_runtime() -> dict[str, object] | None:
@@ -277,7 +320,58 @@ def _get_model_runtime() -> dict[str, object] | None:
     return _MODEL_RUNTIME
 
 
-def run_model_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
+def _get_deep_screen_v1_runtime() -> dict[str, object] | None:
+    global _DEEP_SCREEN_V1_RUNTIME
+    if _DEEP_SCREEN_V1_RUNTIME is not None:
+        return _DEEP_SCREEN_V1_RUNTIME
+    model_path = deep_screen_v1_model_path()
+    if model_path is None:
+        return None
+    try:
+        import torch
+
+        from deep_screen_v1_model import DeepScreenV1Net, load_compatible_state_dict
+    except Exception:
+        return None
+    try:
+        checkpoint = torch.load(model_path, map_location="cpu")
+        model = DeepScreenV1Net(
+            base_channels=int(checkpoint.get("base_channels", 32)),
+            roi_size=int(checkpoint.get("roi_size", 16)),
+            experts=int(checkpoint.get("experts", 3)),
+            expand_ratio=float(checkpoint.get("roi_expand_ratio", 0.08)),
+            roi_adapter_layers=int(checkpoint.get("roi_adapter_layers", 0)),
+            spatial_refine_layers=int(checkpoint.get("spatial_refine_layers", 0)),
+            residual_quad_head_layers=int(checkpoint.get("residual_quad_head_layers", 0)),
+            strict_spatial_refine_layers=int(checkpoint.get("strict_spatial_refine_layers", 0)),
+            candidate_selection_enabled=bool(checkpoint.get("candidate_selection_enabled", False)),
+            state_aware_candidate_enabled=bool(checkpoint.get("state_aware_candidate_enabled", False)),
+            internal_candidate_names=checkpoint.get("internal_candidate_names"),
+            final_output_mode=str(
+                checkpoint.get(
+                    "final_output_mode",
+                    "candidate_selection" if checkpoint.get("candidate_selection_enabled", False) else "base_final",
+                )
+            ),
+            scene_classes=int(checkpoint.get("scene_classes", 4)),
+            scene_embedding_dim=int(checkpoint.get("scene_embedding_dim", 8)),
+            coarse_visibility_refine_enabled=bool(checkpoint.get("coarse_visibility_refine_enabled", False)),
+        )
+        load_compatible_state_dict(model, checkpoint["state_dict"])
+        model.eval()
+        _DEEP_SCREEN_V1_RUNTIME = {
+            "model": model,
+            "input_size": int(checkpoint.get("input_size", 256)),
+            "model_path": model_path,
+            "torch": torch,
+            "opencv_candidate_selection_enabled": bool(checkpoint.get("opencv_candidate_selection_enabled", False)),
+        }
+    except Exception:
+        _DEEP_SCREEN_V1_RUNTIME = None
+    return _DEEP_SCREEN_V1_RUNTIME
+
+
+def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
     if not model_detection_enabled() or not _model_files_exist():
         return None
     try:
@@ -302,7 +396,7 @@ def run_model_detection(image_path: str, image: np.ndarray | None = None) -> dic
         return None
 
     return {
-        "method": "model_three_stage_local_moe" if _local_model_exists() else "model_two_stage",
+        "method": "teacher_current",
         "score": 0.96,
         "confidence": 0.08,
         "metrics": {
@@ -310,6 +404,85 @@ def run_model_detection(image_path: str, image: np.ndarray | None = None) -> dic
             "stage_count": 3.0 if runtime["local_predictor"] is not None else 2.0,
         },
         "quad": result["final_quad"],
+        "source": "runtime_teacher",
+        "model_id": runtime_release_model_id(),
+        "debug_only": False,
+    }
+
+
+def run_model_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
+    return run_teacher_detection(image_path, image=image)
+
+
+def run_deep_screen_v1_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
+    runtime = _get_deep_screen_v1_runtime()
+    if runtime is None:
+        return None
+    if image is None:
+        image = cv2.imread(image_path)
+    if image is None:
+        return None
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    input_size = int(runtime["input_size"])
+    resized = cv2.resize(rgb, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
+    image_f = resized.astype(np.float32) / 255.0
+    tensor = runtime["torch"].from_numpy(np.transpose(image_f, (2, 0, 1))).unsqueeze(0)
+    with runtime["torch"].no_grad():
+        output = runtime["model"](tensor)
+        if runtime.get("opencv_candidate_selection_enabled"):
+            opencv_result = detect_best_candidate(image)
+            if opencv_result is not None and opencv_result.get("best") is not None:
+                opencv_quad = np.array(opencv_result["best"]["quad"], dtype=np.float32).copy()
+                opencv_quad[:, 0] /= max(float(image.shape[1]), 1.0)
+                opencv_quad[:, 1] /= max(float(image.shape[0]), 1.0)
+                external_candidate_quads = runtime["torch"].from_numpy(opencv_quad).to(dtype=tensor.dtype).unsqueeze(0).unsqueeze(0)
+                selection = runtime["model"].select_candidate_pool(
+                    output,
+                    external_candidate_quads=external_candidate_quads,
+                )
+                output["final_quad"] = selection["selected_quad"]
+    quad_norm = output["final_quad"][0].detach().cpu().numpy()
+    height, width = image.shape[:2]
+    quad = [[float(x * width), float(y * height)] for x, y in quad_norm]
+    return {
+        "method": "deep_screen_v1_best",
+        "score": 0.95,
+        "confidence": 0.06,
+        "metrics": {
+            "model": 1.0,
+            "student": 1.0,
+        },
+        "quad": quad,
+        "source": "runtime_student",
+        "model_id": f"deep_screen_v1_{runtime['model_path'].stem}",
+        "debug_only": True,
+    }
+
+
+def _build_best_payload(candidate: dict[str, object]) -> dict[str, object]:
+    return {
+        "method": str(candidate["method"]),
+        "score": float(candidate["score"]),
+        "confidence": float(candidate.get("confidence", 0.0)),
+        "quad": [[float(x), float(y)] for x, y in candidate["quad"]],
+        "source": str(candidate.get("source", "runtime")),
+        "modelId": str(candidate.get("modelId", candidate.get("model_id", candidate["method"]))),
+        "debugOnly": bool(candidate.get("debugOnly", candidate.get("debug_only", False))),
+    }
+
+
+def _build_runtime_candidate(candidate: dict[str, object]) -> dict[str, object]:
+    return {
+        "method": str(candidate["method"]),
+        "score": float(candidate["score"]),
+        "metrics": {
+            key: float(value) if isinstance(value, (int, float)) else value
+            for key, value in dict(candidate.get("metrics", {})).items()
+        },
+        "quad": [[float(x), float(y)] for x, y in candidate["quad"]],
+        "source": str(candidate.get("source", "runtime")),
+        "modelId": str(candidate.get("modelId", candidate.get("model_id", candidate["method"]))),
+        "debugOnly": bool(candidate.get("debugOnly", candidate.get("debug_only", False))),
     }
 
 
@@ -328,27 +501,18 @@ def build_detect_payload(image_path: str, image: np.ndarray) -> dict[str, object
             "candidates": [to_plain_candidate(item) for item in result["candidates"]],
         }
 
-    model_result = run_model_detection(image_path, image=image)
-    if model_result is None:
+    teacher_result = run_teacher_detection(image_path, image=image)
+    if teacher_result is None:
         return base_payload
 
-    model_candidate = {
-        "method": str(model_result["method"]),
-        "score": float(model_result["score"]),
-        "metrics": {
-            key: float(value) if isinstance(value, (int, float)) else value
-            for key, value in dict(model_result.get("metrics", {})).items()
-        },
-        "quad": [[float(x), float(y)] for x, y in model_result["quad"]],
-    }
-    candidates = [model_candidate, *list(base_payload["candidates"])]
+    candidates = [_build_runtime_candidate(teacher_result)]
+    if dual_model_debug_enabled():
+        student_result = run_deep_screen_v1_detection(image_path, image=image)
+        if student_result is not None:
+            candidates.append(_build_runtime_candidate(student_result))
+    candidates.extend(list(base_payload["candidates"]))
     return {
-        "best": {
-            "method": str(model_result["method"]),
-            "score": float(model_result["score"]),
-            "confidence": float(model_result["confidence"]),
-            "quad": [[float(x), float(y)] for x, y in model_result["quad"]],
-        },
+        "best": _build_best_payload(teacher_result),
         "candidates": candidates,
     }
 
