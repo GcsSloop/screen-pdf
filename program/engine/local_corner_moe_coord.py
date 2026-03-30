@@ -159,6 +159,30 @@ class LocalCornerMoECoordTrainResult:
     best_val_point_error: float
 
 
+def load_local_corner_moe_coord_init_state(model: nn.Module, init_model: Path) -> dict[str, Any]:
+    checkpoint = torch.load(init_model, map_location="cpu")
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    model_state = model.state_dict()
+    filtered_state = {
+        key: value
+        for key, value in state_dict.items()
+        if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
+    }
+    skipped_shape = sorted(
+        key
+        for key, value in state_dict.items()
+        if key in model_state and tuple(model_state[key].shape) != tuple(value.shape)
+    )
+    missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+    return {
+        "missing": list(missing),
+        "unexpected": list(unexpected),
+        "loaded": sorted(filtered_state.keys()),
+        "skipped_shape": skipped_shape,
+        "checkpoint_path": str(init_model),
+    }
+
+
 def _evaluate(
     model: nn.Module,
     loader: DataLoader,
@@ -227,11 +251,21 @@ def train_local_corner_moe_coord_model(
     allow_flip_augment: bool = True,
     flip_prob: float | None = None,
     seed: int = 7,
+    init_model: Path | None = None,
+    local_patch_config: dict[str, Any] | None = None,
 ) -> LocalCornerMoECoordTrainResult:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_local_patch_config = {
+        "patch_scale": float((local_patch_config or {}).get("patch_scale", 0.2)),
+        "patch_min": int((local_patch_config or {}).get("patch_min", 96)),
+        "patch_max": int((local_patch_config or {}).get("patch_max", 256)),
+        "bottom_vertical_bias": float((local_patch_config or {}).get("bottom_vertical_bias", 0.0)),
+        "bl_patch_scale_multiplier": float((local_patch_config or {}).get("bl_patch_scale_multiplier", 1.0)),
+        "bl_bottom_vertical_bias": float((local_patch_config or {}).get("bl_bottom_vertical_bias", 0.0)),
+    }
     train_dataset = LocalCornerHeatmapDataset(
         dataset_dir / "train.jsonl",
         dataset_dir,
@@ -259,6 +293,9 @@ def train_local_corner_moe_coord_model(
         metadata_dim=metadata_dim,
         input_channels=input_channels,
     ).to(device)
+    init_state_info: dict[str, Any] | None = None
+    if init_model is not None:
+        init_state_info = load_local_corner_moe_coord_init_state(model, init_model)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     history: list[dict[str, Any]] = []
     best_loss = float("inf")
@@ -333,6 +370,9 @@ def train_local_corner_moe_coord_model(
             "allow_flip_augment": allow_flip_augment,
             "flip_prob": 0.0 if not allow_flip_augment else (0.5 if flip_prob is None else float(flip_prob)),
             "device": device.type,
+            "init_model": str(init_model) if init_model is not None else None,
+            "init_state_info": init_state_info,
+            "local_patch_config": resolved_local_patch_config,
         },
         model_path,
     )
@@ -367,6 +407,13 @@ def main() -> int:
     parser.add_argument("--disable-flip-augment", action="store_true")
     parser.add_argument("--flip-prob", type=float)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--init-model")
+    parser.add_argument("--patch-scale", type=float, default=0.2)
+    parser.add_argument("--patch-min", type=int, default=96)
+    parser.add_argument("--patch-max", type=int, default=256)
+    parser.add_argument("--bottom-vertical-bias", type=float, default=0.0)
+    parser.add_argument("--bl-patch-scale-multiplier", type=float, default=1.0)
+    parser.add_argument("--bl-bottom-vertical-bias", type=float, default=0.0)
     args = parser.parse_args()
     result = train_local_corner_moe_coord_model(
         dataset_dir=Path(args.dataset_dir),
@@ -387,6 +434,15 @@ def main() -> int:
         allow_flip_augment=not args.disable_flip_augment,
         flip_prob=args.flip_prob,
         seed=args.seed,
+        init_model=Path(args.init_model) if args.init_model else None,
+        local_patch_config={
+            "patch_scale": args.patch_scale,
+            "patch_min": args.patch_min,
+            "patch_max": args.patch_max,
+            "bottom_vertical_bias": args.bottom_vertical_bias,
+            "bl_patch_scale_multiplier": args.bl_patch_scale_multiplier,
+            "bl_bottom_vertical_bias": args.bl_bottom_vertical_bias,
+        },
     )
     print(json.dumps(result.__dict__, indent=2, ensure_ascii=False))
     return 0

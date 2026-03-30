@@ -247,11 +247,12 @@ def runtime_release_model_id() -> str:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        release_id = str(payload.get("model_release_id", "")).strip()
         public_name = str(payload.get("public_name", "")).strip()
-        if not public_name:
+        if not release_id and not public_name:
             continue
         if str(payload.get("status", "")).strip().lower() == "promoted":
-            _RUNTIME_RELEASE_MODEL_ID = public_name
+            _RUNTIME_RELEASE_MODEL_ID = release_id or public_name
             return _RUNTIME_RELEASE_MODEL_ID
 
     _RUNTIME_RELEASE_MODEL_ID = "teacher_current"

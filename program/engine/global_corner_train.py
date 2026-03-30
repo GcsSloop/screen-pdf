@@ -4,6 +4,8 @@ import argparse
 import json
 import math
 import random
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,24 @@ def _normalize_manual_quad(quad: list[list[float]] | np.ndarray, width: int, hei
     arr[:, 0] /= max(float(width), 1.0)
     arr[:, 1] /= max(float(height), 1.0)
     return arr
+
+
+def _resolve_training_profile_weights(
+    training_profile: str,
+    geometry_loss_weight: float | None,
+    edge_supervision_weight: float | None,
+) -> tuple[float, float]:
+    if training_profile == "default":
+        return (
+            1.0 if geometry_loss_weight is None else float(geometry_loss_weight),
+            0.2 if edge_supervision_weight is None else float(edge_supervision_weight),
+        )
+    if training_profile == "legacy_r3":
+        return (
+            1.0 if geometry_loss_weight is None else float(geometry_loss_weight),
+            0.0 if edge_supervision_weight is None else float(edge_supervision_weight),
+        )
+    raise ValueError(f"unsupported training_profile: {training_profile}")
 
 
 def reframe_image_and_corners(
@@ -76,6 +96,39 @@ def _allowed_shift_range(corners: np.ndarray, scale: float) -> tuple[float, floa
     min_x = float(np.min(scaled[:, 0]))
     max_x = float(np.max(scaled[:, 0]))
     return -min_x, 1.0 - max_x
+
+
+def is_legacy_dark_muted_scene(image: np.ndarray) -> bool:
+    if image.size == 0:
+        return False
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    mean_saturation = float(np.mean(hsv[..., 1]))
+    mean_value = float(np.mean(hsv[..., 2]))
+    return 20.0 <= mean_saturation <= 95.0 and 72.0 <= mean_value <= 110.0
+
+
+def _apply_foreground_occluder(image: np.ndarray) -> np.ndarray:
+    height, width = image.shape[:2]
+    overlay = image.astype(np.float32).copy()
+    mask = np.zeros((height, width), dtype=np.uint8)
+    anchor_x = int(random.uniform(0.18, 0.52) * width)
+    anchor_y = int(random.uniform(0.72, 0.90) * height)
+    occluder_width = int(random.uniform(0.16, 0.30) * width)
+    occluder_height = int(random.uniform(0.14, 0.24) * height)
+    points = np.array(
+        [
+            [anchor_x - occluder_width, height - 1],
+            [anchor_x + occluder_width, height - 1],
+            [anchor_x + int(0.35 * occluder_width), anchor_y],
+            [anchor_x - int(0.55 * occluder_width), anchor_y + int(0.08 * occluder_height)],
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(mask, points, 255)
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=7.0)
+    darkness = random.uniform(0.28, 0.48)
+    overlay[mask > 0] *= 1.0 - darkness
+    return np.clip(overlay, 0, 255).astype(np.uint8)
 
 
 def _quad_area_torch(corners: torch.Tensor) -> torch.Tensor:
@@ -240,10 +293,18 @@ def compute_global_geometry_loss(
 
 
 class GlobalCornerDataset(Dataset):
-    def __init__(self, manifest_path: Path, input_size: int = 256, output_size: int = 64, augment: bool = False) -> None:
+    def __init__(
+        self,
+        manifest_path: Path,
+        input_size: int = 256,
+        output_size: int = 64,
+        augment: bool = False,
+        training_profile: str = "default",
+    ) -> None:
         self.input_size = input_size
         self.output_size = output_size
         self.augment = augment
+        self.training_profile = training_profile
         lines = manifest_path.read_text(encoding="utf-8").splitlines()
         self.rows = [json.loads(line) for line in lines if line.strip()]
 
@@ -261,6 +322,8 @@ class GlobalCornerDataset(Dataset):
         return arr / max(float(arr.mean()), 1e-6)
 
     def _geometry_scale(self, row: dict[str, Any]) -> float:
+        if self.training_profile == "legacy_r3":
+            return 1.0
         tags = set(row.get("scene_tags") or [])
         scale = 0.85
         if "bright_screen" in tags:
@@ -274,6 +337,8 @@ class GlobalCornerDataset(Dataset):
         return float(scale)
 
     def _edge_scale(self, corners: np.ndarray) -> float:
+        if self.training_profile == "legacy_r3":
+            return 1.0
         width_fraction = float(np.max(corners[:, 0]) - np.min(corners[:, 0]))
         if width_fraction >= 0.84:
             return 0.85
@@ -291,7 +356,52 @@ class GlobalCornerDataset(Dataset):
             corners = corners[[1, 0, 3, 2]]
         width_fraction = float(np.max(corners[:, 0]) - np.min(corners[:, 0]))
         center_x = float(np.mean(corners[:, 0]))
-        if width_fraction > 0.82 and random.random() < 0.55:
+        if (
+            self.training_profile == "legacy_r3"
+            and width_fraction >= 0.72
+            and 0.38 <= center_x <= 0.62
+            and is_legacy_dark_muted_scene(image)
+            and random.random() < 0.12
+        ):
+            scale = random.uniform(0.48, 0.62)
+            shift_left, shift_right = _allowed_shift_range(corners, scale)
+            shift_floor = max(-0.04, shift_left)
+            shift_cap = min(0.04, shift_right)
+            if shift_floor < shift_cap:
+                shift_x = random.uniform(shift_floor, shift_cap)
+                shift_y = random.uniform(-0.10, -0.03)
+                image, corners = reframe_image_and_corners(
+                    image,
+                    corners,
+                    scale=scale,
+                    shift_x=shift_x,
+                    shift_y=shift_y,
+                )
+                if random.random() < 0.45:
+                    image = _apply_foreground_occluder(image)
+        elif (
+            self.training_profile == "legacy_r3"
+            and 0.58 <= width_fraction <= 0.82
+            and 0.34 <= center_x <= 0.66
+            and random.random() < 0.22
+        ):
+            scale = random.uniform(0.72, 0.84)
+            shift_left, shift_right = _allowed_shift_range(corners, scale)
+            shift_floor = max(-0.05, shift_left)
+            shift_cap = min(0.05, shift_right)
+            if shift_floor < shift_cap:
+                shift_x = random.uniform(shift_floor, shift_cap)
+                shift_y = random.uniform(-0.06, 0.03)
+                image, corners = reframe_image_and_corners(
+                    image,
+                    corners,
+                    scale=scale,
+                    shift_x=shift_x,
+                    shift_y=shift_y,
+                )
+                if random.random() < 0.30:
+                    image = _apply_foreground_occluder(image)
+        elif width_fraction > 0.82 and random.random() < 0.55:
             scale = random.uniform(0.84, 0.94)
             shift_span = min(0.10, max((1.0 - scale) * 0.5 - 0.01, 0.02))
             shift_x = random.uniform(-shift_span, shift_span)
@@ -303,7 +413,12 @@ class GlobalCornerDataset(Dataset):
                 shift_x=shift_x,
                 shift_y=shift_y,
             )
-        elif 0.66 <= width_fraction <= 0.82 and 0.38 <= center_x <= 0.62 and random.random() < 0.22:
+        elif (
+            self.training_profile != "legacy_r3"
+            and 0.66 <= width_fraction <= 0.82
+            and 0.38 <= center_x <= 0.62
+            and random.random() < 0.22
+        ):
             scale = random.uniform(0.92, 0.98)
             shift_left, shift_right = _allowed_shift_range(corners, scale)
             shift_cap = min(0.14, shift_right)
@@ -319,7 +434,7 @@ class GlobalCornerDataset(Dataset):
                     shift_y=shift_y,
                 )
         scene_tags = set(row.get("scene_tags") or [])
-        if "near_color_background" in scene_tags or "low_contrast_scene" in scene_tags:
+        if self.training_profile != "legacy_r3" and ("near_color_background" in scene_tags or "low_contrast_scene" in scene_tags):
             gamma = random.uniform(0.92, 1.08)
             lut = np.array([pow(i / 255.0, gamma) * 255.0 for i in range(256)], dtype=np.uint8)
             image = cv2.LUT(image, lut)
@@ -347,7 +462,7 @@ class GlobalCornerDataset(Dataset):
                 image = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2RGB)
             if random.random() < 0.35:
                 image = cv2.GaussianBlur(image, (5, 5), sigmaX=0.0)
-        if "black_frame_scene" in scene_tags and random.random() < 0.45:
+        if self.training_profile != "legacy_r3" and "black_frame_scene" in scene_tags and random.random() < 0.45:
             height, width = image.shape[:2]
             mask = np.zeros((height, width), dtype=np.uint8)
             points = np.round(corners * np.array([width - 1, height - 1], dtype=np.float32)).astype(np.int32)
@@ -356,6 +471,20 @@ class GlobalCornerDataset(Dataset):
             image_f = image.astype(np.float32)
             image_f[border > 0] *= random.uniform(0.7, 0.88)
             image = np.clip(image_f, 0, 255).astype(np.uint8)
+        if self.training_profile == "legacy_r3" and is_legacy_dark_muted_scene(image) and random.random() < 0.35:
+            height, width = image.shape[:2]
+            mask = np.zeros((height, width), dtype=np.uint8)
+            points = np.round(corners * np.array([width - 1, height - 1], dtype=np.float32)).astype(np.int32)
+            cv2.fillConvexPoly(mask, points, 255)
+            ring = cv2.dilate(mask, np.ones((15, 15), dtype=np.uint8), iterations=1)
+            ring = cv2.subtract(ring, mask)
+            image_f = image.astype(np.float32)
+            if np.any(mask > 0) and np.any(ring > 0):
+                ring_mean = image_f[ring > 0].mean(axis=0)
+                image_f[mask > 0] = image_f[mask > 0] * 0.82 + ring_mean * 0.18
+            image = np.clip(image_f, 0, 255).astype(np.uint8)
+            if random.random() < 0.5:
+                image = cv2.GaussianBlur(image, (5, 5), sigmaX=0.0)
         alpha = 1.0 + random.uniform(-0.15, 0.15)
         beta = random.uniform(-18.0, 18.0)
         image = np.clip(image.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
@@ -459,6 +588,52 @@ def export_global_corner_split(
     return summary
 
 
+def _read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _write_jsonl_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    path.write_text(text + ("\n" if text else ""), encoding="utf-8")
+
+
+def build_effective_split_dir(
+    split_dir: Path,
+    *,
+    merge_focus_train: bool = False,
+    focus_train_repeat: int = 1,
+    merge_focus_test: bool = False,
+) -> Path:
+    if not merge_focus_train and not merge_focus_test:
+        return split_dir
+
+    focus_train_repeat = max(int(focus_train_repeat), 1)
+    train_rows = _read_jsonl_rows(split_dir / "train.jsonl")
+    test_rows = _read_jsonl_rows(split_dir / "test.jsonl")
+    focus_train_rows = _read_jsonl_rows(split_dir / "focus_train.jsonl")
+    focus_test_rows = _read_jsonl_rows(split_dir / "focus_test.jsonl")
+
+    merged_train = list(train_rows)
+    if merge_focus_train and focus_train_rows:
+        for _ in range(focus_train_repeat):
+            merged_train.extend(focus_train_rows)
+
+    merged_test = list(test_rows)
+    if merge_focus_test and focus_test_rows:
+        merged_test.extend(focus_test_rows)
+
+    effective_dir = Path(tempfile.mkdtemp(prefix="global-corner-split-", dir=str(split_dir.parent)))
+    for name in ("focus_train.jsonl", "focus_test.jsonl", "holdout.jsonl", "summary.json"):
+        source = split_dir / name
+        if source.exists():
+            shutil.copy2(source, effective_dir / name)
+    _write_jsonl_rows(effective_dir / "train.jsonl", merged_train)
+    _write_jsonl_rows(effective_dir / "test.jsonl", merged_test)
+    return effective_dir
+
+
 def _evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
     model.eval()
     losses: list[float] = []
@@ -505,6 +680,52 @@ class GlobalTrainResult:
     best_val_point_le_0_01: float
 
 
+def _save_checkpoint(
+    checkpoint_path: Path,
+    state_dict: dict[str, torch.Tensor],
+    *,
+    input_size: int,
+    output_size: int,
+    channels: int,
+    device: torch.device,
+    corner_weights: tuple[float, float, float, float],
+    sample_weight_power: float,
+    geometry_loss_weight: float,
+    edge_supervision_weight: float,
+    inset_weight: float,
+    max_corner_weight: float,
+    edge_weight: float,
+    edge_line_weight: float,
+    edge_length_weight: float,
+    corner_line_weight: float,
+    corner_angle_weight: float,
+    training_profile: str,
+) -> None:
+    torch.save(
+        {
+            "state_dict": state_dict,
+            "input_size": input_size,
+            "output_size": output_size,
+            "channels": channels,
+            "decode_mode": "soft_argmax",
+            "device": device.type,
+            "corner_weights": [float(value) for value in corner_weights],
+            "sample_weight_power": float(sample_weight_power),
+            "geometry_loss_weight": float(geometry_loss_weight),
+            "edge_supervision_weight": float(edge_supervision_weight),
+            "inset_weight": float(inset_weight),
+            "max_corner_weight": float(max_corner_weight),
+            "edge_weight": float(edge_weight),
+            "edge_line_weight": float(edge_line_weight),
+            "edge_length_weight": float(edge_length_weight),
+            "corner_line_weight": float(corner_line_weight),
+            "corner_angle_weight": float(corner_angle_weight),
+            "training_profile": training_profile,
+        },
+        checkpoint_path,
+    )
+
+
 def train_global_corner_model(
     dataset_root: Path,
     output_dir: Path,
@@ -516,11 +737,23 @@ def train_global_corner_model(
     channels: int = 24,
     seed: int = 7,
     init_model_path: Path | None = None,
-    geometry_loss_weight: float = 1.0,
-    edge_supervision_weight: float = 0.2,
+    geometry_loss_weight: float | None = None,
+    edge_supervision_weight: float | None = None,
     split_dir: Path | None = None,
     sample_weight_power: float = 0.0,
     corner_weights: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
+    inset_weight: float = 0.25,
+    max_corner_weight: float = 1.15,
+    edge_weight: float = 0.35,
+    edge_line_weight: float = 0.9,
+    edge_length_weight: float = 0.4,
+    corner_line_weight: float = 0.7,
+    corner_angle_weight: float = 0.28,
+    training_profile: str = "default",
+    save_epoch_checkpoints: bool = False,
+    merge_focus_train: bool = False,
+    focus_train_repeat: int = 1,
+    merge_focus_test: bool = False,
 ) -> GlobalTrainResult:
     random.seed(seed)
     np.random.seed(seed)
@@ -529,9 +762,32 @@ def train_global_corner_model(
     active_split_dir = split_dir or (output_dir / "split")
     if split_dir is None:
         export_global_corner_split(dataset_root, active_split_dir, seed=seed, test_ratio=0.25)
+    active_split_dir = build_effective_split_dir(
+        active_split_dir,
+        merge_focus_train=merge_focus_train,
+        focus_train_repeat=focus_train_repeat,
+        merge_focus_test=merge_focus_test,
+    )
+    geometry_loss_weight, edge_supervision_weight = _resolve_training_profile_weights(
+        training_profile,
+        geometry_loss_weight,
+        edge_supervision_weight,
+    )
 
-    train_dataset = GlobalCornerDataset(active_split_dir / "train.jsonl", input_size=input_size, output_size=output_size, augment=True)
-    test_dataset = GlobalCornerDataset(active_split_dir / "test.jsonl", input_size=input_size, output_size=output_size, augment=False)
+    train_dataset = GlobalCornerDataset(
+        active_split_dir / "train.jsonl",
+        input_size=input_size,
+        output_size=output_size,
+        augment=True,
+        training_profile=training_profile,
+    )
+    test_dataset = GlobalCornerDataset(
+        active_split_dir / "test.jsonl",
+        input_size=input_size,
+        output_size=output_size,
+        augment=False,
+        training_profile=training_profile,
+    )
     train_loader_kwargs: dict[str, Any] = {"batch_size": batch_size, "num_workers": 0}
     if sample_weight_power > 0.0:
         weights = torch.from_numpy(train_dataset.build_sample_weights(power=sample_weight_power)).double()
@@ -553,6 +809,9 @@ def train_global_corner_model(
     best_metrics: dict[str, float] | None = None
     best_state: dict[str, torch.Tensor] | None = None
     history: list[dict[str, Any]] = []
+    checkpoint_dir = output_dir / "checkpoints"
+    if save_epoch_checkpoints:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -568,7 +827,18 @@ def train_global_corner_model(
             pred = decode_heatmaps(logits)
             heatmap_loss = torch.mean((logits - targets) ** 2)
             coord_loss = compute_corner_weighted_coord_loss(pred, corners, corner_weight_tensor)
-            geometry_loss, _ = compute_global_geometry_loss(pred, corners, sample_scales=geometry_scales)
+            geometry_loss, _ = compute_global_geometry_loss(
+                pred,
+                corners,
+                max_corner_weight=max_corner_weight,
+                edge_weight=edge_weight,
+                edge_line_weight=edge_line_weight,
+                edge_length_weight=edge_length_weight,
+                corner_line_weight=corner_line_weight,
+                corner_angle_weight=corner_angle_weight,
+                inset_weight=inset_weight,
+                sample_scales=geometry_scales,
+            )
             edge_loss = compute_edge_supervision_loss(pred, corners, output_size=output_size, sample_scales=edge_scales)
             loss = heatmap_loss + coord_loss * 2.5 + geometry_loss * geometry_loss_weight + edge_loss * edge_supervision_weight
             loss.backward()
@@ -577,6 +847,28 @@ def train_global_corner_model(
         val = _evaluate(model, test_loader, device)
         row = {"epoch": epoch, "train_loss": float(np.mean(train_losses)) if train_losses else 0.0, **val}
         history.append(row)
+        epoch_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        if save_epoch_checkpoints:
+            _save_checkpoint(
+                checkpoint_dir / f"epoch_{epoch:03d}.pt",
+                epoch_state,
+                input_size=input_size,
+                output_size=output_size,
+                channels=channels,
+                device=device,
+                corner_weights=corner_weights,
+                sample_weight_power=sample_weight_power,
+                geometry_loss_weight=geometry_loss_weight,
+                edge_supervision_weight=edge_supervision_weight,
+                inset_weight=inset_weight,
+                max_corner_weight=max_corner_weight,
+                edge_weight=edge_weight,
+                edge_line_weight=edge_line_weight,
+                edge_length_weight=edge_length_weight,
+                corner_line_weight=corner_line_weight,
+                corner_angle_weight=corner_angle_weight,
+                training_profile=training_profile,
+            )
         val_score = (
             float(val["screen_relative_error_mean"]),
             float(val["max_corner_error_mean"]),
@@ -587,24 +879,31 @@ def train_global_corner_model(
             best_score = val_score
             best_epoch = epoch
             best_metrics = dict(val)
-            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            best_state = epoch_state
 
     if best_state is None or best_metrics is None:
         raise RuntimeError("no checkpoint saved")
 
     model_path = output_dir / "global_corner_model.pt"
-    torch.save(
-        {
-            "state_dict": best_state,
-            "input_size": input_size,
-            "output_size": output_size,
-            "channels": channels,
-            "decode_mode": "soft_argmax",
-            "device": device.type,
-            "corner_weights": [float(value) for value in corner_weights],
-            "sample_weight_power": float(sample_weight_power),
-        },
+    _save_checkpoint(
         model_path,
+        best_state,
+        input_size=input_size,
+        output_size=output_size,
+        channels=channels,
+        device=device,
+        corner_weights=corner_weights,
+        sample_weight_power=sample_weight_power,
+        geometry_loss_weight=geometry_loss_weight,
+        edge_supervision_weight=edge_supervision_weight,
+        inset_weight=inset_weight,
+        max_corner_weight=max_corner_weight,
+        edge_weight=edge_weight,
+        edge_line_weight=edge_line_weight,
+        edge_length_weight=edge_length_weight,
+        corner_line_weight=corner_line_weight,
+        corner_angle_weight=corner_angle_weight,
+        training_profile=training_profile,
     )
     history_path = output_dir / "global_corner_history.json"
     history_path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -634,10 +933,22 @@ def main() -> int:
     parser.add_argument("--channels", type=int, default=24)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--init-model")
-    parser.add_argument("--geometry-loss-weight", type=float, default=1.0)
-    parser.add_argument("--edge-supervision-weight", type=float, default=0.2)
+    parser.add_argument("--geometry-loss-weight", type=float)
+    parser.add_argument("--edge-supervision-weight", type=float)
     parser.add_argument("--split-dir")
     parser.add_argument("--sample-weight-power", type=float, default=0.0)
+    parser.add_argument("--inset-weight", type=float, default=0.25)
+    parser.add_argument("--max-corner-weight", type=float, default=1.15)
+    parser.add_argument("--edge-weight", type=float, default=0.35)
+    parser.add_argument("--edge-line-weight", type=float, default=0.9)
+    parser.add_argument("--edge-length-weight", type=float, default=0.4)
+    parser.add_argument("--corner-line-weight", type=float, default=0.7)
+    parser.add_argument("--corner-angle-weight", type=float, default=0.28)
+    parser.add_argument("--training-profile", default="default", choices=["default", "legacy_r3"])
+    parser.add_argument("--save-epoch-checkpoints", action="store_true")
+    parser.add_argument("--merge-focus-train", action="store_true")
+    parser.add_argument("--focus-train-repeat", type=int, default=1)
+    parser.add_argument("--merge-focus-test", action="store_true")
     parser.add_argument(
         "--corner-weights",
         default="1,1,1,1",
@@ -659,11 +970,23 @@ def main() -> int:
         channels=args.channels,
         seed=args.seed,
         init_model_path=Path(args.init_model) if args.init_model else None,
-        geometry_loss_weight=float(args.geometry_loss_weight),
-        edge_supervision_weight=float(args.edge_supervision_weight),
+        geometry_loss_weight=float(args.geometry_loss_weight) if args.geometry_loss_weight is not None else None,
+        edge_supervision_weight=float(args.edge_supervision_weight) if args.edge_supervision_weight is not None else None,
         split_dir=Path(args.split_dir) if args.split_dir else None,
         sample_weight_power=float(args.sample_weight_power),
         corner_weights=corner_weights,
+        inset_weight=float(args.inset_weight),
+        max_corner_weight=float(args.max_corner_weight),
+        edge_weight=float(args.edge_weight),
+        edge_line_weight=float(args.edge_line_weight),
+        edge_length_weight=float(args.edge_length_weight),
+        corner_line_weight=float(args.corner_line_weight),
+        corner_angle_weight=float(args.corner_angle_weight),
+        training_profile=str(args.training_profile),
+        save_epoch_checkpoints=bool(args.save_epoch_checkpoints),
+        merge_focus_train=bool(args.merge_focus_train),
+        focus_train_repeat=int(args.focus_train_repeat),
+        merge_focus_test=bool(args.merge_focus_test),
     )
     print(json.dumps(result.__dict__, indent=2, ensure_ascii=False))
     return 0

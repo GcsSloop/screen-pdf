@@ -17,16 +17,11 @@ data/*
 
 training/*
 !training/README.md
-!training/reports/
-!training/reports/*.md
 !training/registry/
-!training/registry/*.json
-training/reports/*.json
-training/runs/**/artifacts/**
-training/runs/**/checkpoints/**
-training/runs/**/data/**
-training/runs/**/logs/**
-training/runs/**/reports/**
+training/registry/*
+!training/registry/deep_screen*.json
+training/reports/
+training/runs/
 
 research/*
 !research/README.md
@@ -37,3 +32,5 @@ research/experiments/
 *.onnx
 *.safetensors
 tmp_img_*.jpg
+models/runtime/*.pre_*.pt
+models/runtime/*debug*.pt

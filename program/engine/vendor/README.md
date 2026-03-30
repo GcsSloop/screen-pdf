@@ -1,4 +1,4 @@
-Place bundled runtime files here for green builds.
+Place packaged runtime files here for self-contained desktop builds.
 
 Expected layout:
 
@@ -12,4 +12,23 @@ Expected layout:
 - `windows/bin/gswin64c.exe`
 - `linux/bin/gs`
 
-The Python engine already checks these paths before falling back to system binaries.
+Optional additional payloads may be staged alongside the binaries when a platform runtime needs them, for example:
+
+- `macos/lib/...`
+- `windows/lib/...`
+- `linux/lib/...`
+- OCR language data directories such as `tessdata/`
+
+This directory is owned by the packaging scripts under `scripts/desktop/`.
+
+- `scripts/desktop/prepare_runtime_macos.sh`
+- `scripts/desktop/prepare_runtime_windows.ps1`
+- `scripts/desktop/prepare_runtime_linux.sh`
+
+Default contract:
+
+- packaging scripts populate `program/engine/vendor/<platform>/`
+- desktop bundle includes this directory as a Tauri resource
+- runtime verification rejects a release bundle when the expected files are missing
+
+The Python engine checks these bundled paths before falling back to system binaries during development. Release verification is stricter and requires the bundled runtime to be present.
