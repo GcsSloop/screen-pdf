@@ -142,7 +142,9 @@ def _matching_paths(bundle_dir: Path, platform_name: str) -> list[Path]:
         ],
         "windows": [
             "msi/*.msi",
+            "msi/*.sig",
             "nsis/*.exe",
+            "nsis/*.sig",
             "updater/*.zip",
             "updater/*.sig",
             "updater/*.json",

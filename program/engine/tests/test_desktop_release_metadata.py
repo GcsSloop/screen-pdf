@@ -69,6 +69,33 @@ class ReleaseMetadataTests(unittest.TestCase):
             checksum_file = output_dir / "0.2.0" / "macos" / "SHA256SUMS.txt"
             self.assertTrue(checksum_file.exists())
 
+    def test_collect_release_assets_includes_windows_signatures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle_dir = root / "program" / "desktop" / "src-tauri" / "target" / "release" / "bundle"
+            msi_dir = bundle_dir / "msi"
+            nsis_dir = bundle_dir / "nsis"
+            msi_dir.mkdir(parents=True)
+            nsis_dir.mkdir(parents=True)
+            (msi_dir / "ScreenPDF_0.2.1_x64_en-US.msi").write_bytes(b"msi")
+            (msi_dir / "ScreenPDF_0.2.1_x64_en-US.msi.sig").write_text("msi-signature", encoding="utf-8")
+            (nsis_dir / "ScreenPDF_0.2.1_x64-setup.exe").write_bytes(b"exe")
+            (nsis_dir / "ScreenPDF_0.2.1_x64-setup.exe.sig").write_text("exe-signature", encoding="utf-8")
+            output_dir = root / "release-assets"
+
+            collected = collect_release_assets(
+                version="0.2.1",
+                platform_name="windows",
+                bundle_dir=bundle_dir,
+                output_root=output_dir,
+            )
+
+            paths = {Path(item["target_path"]).name for item in collected["artifacts"]}
+            self.assertIn("ScreenPDF_0.2.1_x64_en-US.msi", paths)
+            self.assertIn("ScreenPDF_0.2.1_x64_en-US.msi.sig", paths)
+            self.assertIn("ScreenPDF_0.2.1_x64-setup.exe", paths)
+            self.assertIn("ScreenPDF_0.2.1_x64-setup.exe.sig", paths)
+
 
 if __name__ == "__main__":
     unittest.main()
