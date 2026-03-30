@@ -1,8 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
 use chrono::{DateTime, Local};
 use exif::{In, Reader, Tag};
+use futures_util::StreamExt;
+use minisign_verify::{PublicKey, Signature};
+use reqwest::header::{HeaderValue, ACCEPT};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -11,10 +15,12 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
+    sync::Mutex,
     sync::OnceLock,
     time::SystemTime,
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Candidate {
@@ -109,6 +115,9 @@ struct ProjectFile {
 }
 
 const CURRENT_DATA_STRUCTURE_VERSION: u32 = 2;
+const UPDATE_POLL_CHUNK_SIZE: usize = 64 * 1024;
+const UPDATER_PUBKEY_BASE64: &str =
+    "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1RDYwNjI4MUMzQkFDMTIKUldRU3JEc2NLQWJXMWExcTZrWDVtT2dLRmtCQURPSmVqZ0Q5cWd5bWhZd3F1cnRBbE5KWEQwS2EK";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "snake_case", deserialize = "camelCase"))]
@@ -211,6 +220,62 @@ struct ScanProgressEvent {
     total: usize,
     current_name: Option<String>,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfoPayload {
+    body: Option<String>,
+    current_version: String,
+    date: Option<String>,
+    version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgressPayload {
+    percent: f64,
+    total: u64,
+    transferred: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate,
+    Available,
+    Downloading,
+    Ready,
+    Unsupported,
+    Error,
+}
+
+impl Default for UpdateStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct UpdateStatePayload {
+    status: UpdateStatus,
+    update: Option<UpdateInfoPayload>,
+    progress: Option<UpdateProgressPayload>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct UpdateManagerState {
+    snapshot: UpdateStatePayload,
+}
+
+static UPDATE_MANAGER: OnceLock<Mutex<UpdateManagerState>> = OnceLock::new();
+
+fn update_manager() -> &'static Mutex<UpdateManagerState> {
+    UPDATE_MANAGER.get_or_init(|| Mutex::new(UpdateManagerState::default()))
 }
 
 fn supported_image(path: &Path) -> bool {
@@ -338,13 +403,11 @@ fn python_cmd(app: &AppHandle) -> Result<PathBuf> {
             Ok(value) => value,
             Err(_) => return None,
         };
-        python_candidates(app)
-            .ok()
-            .and_then(|candidates| {
-                candidates
-                    .into_iter()
-                    .find(|candidate| python_supports_engine(candidate, &engine))
-            })
+        python_candidates(app).ok().and_then(|candidates| {
+            candidates
+                .into_iter()
+                .find(|candidate| python_supports_engine(candidate, &engine))
+        })
     });
 
     if let Some(path) = resolved {
@@ -364,9 +427,10 @@ fn python_cmd(app: &AppHandle) -> Result<PathBuf> {
 fn configure_engine_command(command: &mut Command, app: &AppHandle) {
     command.env("SCREEN_PDF_DEBUG_DUAL_MODEL", "1");
     if let Ok(resource_dir) = app.path().resource_dir() {
-        if let Some(model_dir) =
-            resolve_resource_path_from_base(&resource_dir, Path::new("models").join("runtime").as_path())
-        {
+        if let Some(model_dir) = resolve_resource_path_from_base(
+            &resource_dir,
+            Path::new("models").join("runtime").as_path(),
+        ) {
             command.env("SCREEN_PDF_MODEL_DIR", &model_dir);
             let model_path = model_dir.join("deep_screen_v1_debug.pt");
             if model_path.exists() {
@@ -392,6 +456,155 @@ fn clear_runtime_temp_artifacts() -> Result<()> {
 
 fn emit_scan_progress(app: &AppHandle, event: ScanProgressEvent) {
     let _ = app.emit("scan-progress", event);
+}
+
+fn lock_update_manager() -> Result<std::sync::MutexGuard<'static, UpdateManagerState>, String> {
+    update_manager()
+        .lock()
+        .map_err(|_| "update manager lock poisoned".to_string())
+}
+
+fn current_update_snapshot(current_version: &str) -> UpdateStatePayload {
+    let snapshot = lock_update_manager()
+        .map(|manager| manager.snapshot.clone())
+        .unwrap_or_default();
+    normalize_update_snapshot(snapshot, current_version)
+}
+
+fn normalize_update_snapshot(
+    mut snapshot: UpdateStatePayload,
+    current_version: &str,
+) -> UpdateStatePayload {
+    if let Some(update) = snapshot.update.as_mut() {
+        if update.current_version.is_empty() {
+            update.current_version = current_version.to_string();
+        }
+    }
+    snapshot
+}
+
+async fn fetch_update<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Option<Update>, String> {
+    app.updater()
+        .map_err(|err| format!("build updater failed: {err}"))?
+        .check()
+        .await
+        .map_err(|err| format!("check update failed: {err}"))
+}
+
+fn to_update_info_payload(current_version: &str, update: &Update) -> UpdateInfoPayload {
+    UpdateInfoPayload {
+        body: update.body.clone(),
+        current_version: current_version.to_string(),
+        date: update.date.map(|value| value.to_string()),
+        version: update.version.clone(),
+    }
+}
+
+fn update_download_progress(
+    transferred: u64,
+    total: u64,
+    update: UpdateInfoPayload,
+) -> Result<(), String> {
+    let percent = if total > 0 {
+        ((transferred as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let mut manager = lock_update_manager()?;
+    manager.snapshot = UpdateStatePayload {
+        status: UpdateStatus::Downloading,
+        update: Some(update),
+        progress: Some(UpdateProgressPayload {
+            percent,
+            total,
+            transferred,
+        }),
+        error: None,
+    };
+    Ok(())
+}
+
+fn decode_base64_to_string(value: &str) -> Result<String, String> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|err| format!("decode base64 failed: {err}"))?;
+    std::str::from_utf8(&decoded)
+        .map_err(|_| "decode utf-8 failed".to_string())
+        .map(|text| text.to_string())
+}
+
+fn verify_update_signature(data: &[u8], release_signature: &str) -> Result<(), String> {
+    let pub_key = decode_base64_to_string(UPDATER_PUBKEY_BASE64)?;
+    let public_key = PublicKey::decode(&pub_key)
+        .map_err(|err| format!("decode updater public key failed: {err}"))?;
+    let signature_text = decode_base64_to_string(release_signature)?;
+    let signature = Signature::decode(&signature_text)
+        .map_err(|err| format!("decode update signature failed: {err}"))?;
+    public_key
+        .verify(data, &signature, true)
+        .map_err(|err| format!("verify update signature failed: {err}"))?;
+    Ok(())
+}
+
+async fn download_update_bytes(update: &Update, current_version: &str) -> Result<Vec<u8>, String> {
+    let mut headers = update.headers.clone();
+    if !headers.contains_key(ACCEPT) {
+        headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+    }
+
+    let mut request = reqwest::ClientBuilder::new().user_agent("screen-pdf-desktop-updater");
+    if let Some(timeout) = update.timeout {
+        request = request.timeout(timeout);
+    }
+    if update.no_proxy {
+        request = request.no_proxy();
+    } else if let Some(ref proxy) = update.proxy {
+        let parsed = reqwest::Proxy::all(proxy.as_str())
+            .map_err(|err| format!("configure updater proxy failed: {err}"))?;
+        request = request.proxy(parsed);
+    }
+
+    let response = request
+        .build()
+        .map_err(|err| format!("build updater client failed: {err}"))?
+        .get(update.download_url.clone())
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|err| format!("download update failed: {err}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "download request failed with status: {}",
+            response.status()
+        ));
+    }
+
+    let total = response.content_length().unwrap_or(0);
+    let mut transferred = 0_u64;
+    let mut buffer = Vec::with_capacity(total.min(UPDATE_POLL_CHUNK_SIZE as u64) as usize);
+    let mut stream = response.bytes_stream();
+
+    while let Some(next) = stream.next().await {
+        let chunk = next.map_err(|err| format!("read update chunk failed: {err}"))?;
+        transferred += chunk.len() as u64;
+        buffer.extend_from_slice(&chunk);
+        update_download_progress(
+            transferred,
+            total,
+            to_update_info_payload(current_version, update),
+        )?;
+    }
+
+    verify_update_signature(&buffer, &update.signature)?;
+    Ok(buffer)
+}
+
+async fn download_and_install_update(update: Update, current_version: &str) -> Result<(), String> {
+    let bytes = download_update_bytes(&update, current_version).await?;
+    update
+        .install(bytes)
+        .map_err(|err| format!("install update failed: {err}"))
 }
 
 fn candidate_export_quad(page: &PageRecord) -> Vec<[f64; 2]> {
@@ -474,7 +687,10 @@ fn thumbnail_dir() -> PathBuf {
 }
 
 fn thumbnail_file_name(path: &Path, stamp: u64) -> String {
-    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("page");
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("page");
     format!("{stem}-{stamp}.jpg")
 }
 
@@ -521,7 +737,10 @@ fn open_output_directory(output_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to open directory {}", directory.display()))?;
 
     if !status.success() {
-        return Err(anyhow!("failed to open output directory {}", directory.display()));
+        return Err(anyhow!(
+            "failed to open output directory {}",
+            directory.display()
+        ));
     }
 
     Ok(())
@@ -542,12 +761,19 @@ fn parse_engine_detect_output(output: &[u8]) -> Result<RawEngineResult> {
         }
     }
 
-    Err(anyhow!("failed to parse engine detect output: {}", text.trim()))
+    Err(anyhow!(
+        "failed to parse engine detect output: {}",
+        text.trim()
+    ))
 }
 
 fn parse_batch_engine_result_line(line: &str) -> Result<RawBatchEngineResult> {
-    serde_json::from_str::<RawBatchEngineResult>(line.trim())
-        .with_context(|| format!("failed to parse engine batch detect output line: {}", line.trim()))
+    serde_json::from_str::<RawBatchEngineResult>(line.trim()).with_context(|| {
+        format!(
+            "failed to parse engine batch detect output line: {}",
+            line.trim()
+        )
+    })
 }
 
 fn fallback_engine_result(image_path: &Path) -> EngineResult {
@@ -712,7 +938,9 @@ fn run_engine_detect_batch(
         results.insert(image_path, result);
     }
 
-    let status = child.wait().context("failed to wait for batch detection engine")?;
+    let status = child
+        .wait()
+        .context("failed to wait for batch detection engine")?;
     let mut stderr = String::new();
     let _ = stderr_pipe.read_to_string(&mut stderr);
     let _ = fs::remove_file(&manifest_path);
@@ -756,11 +984,16 @@ fn run_engine_preview(app: &AppHandle, image_path: &Path, quad: &[[f64; 2]]) -> 
     Ok(preview_path.to_string_lossy().to_string())
 }
 
-fn run_engine_export(app: &AppHandle, project: &ProjectFile, options: &ExportOptions) -> Result<ExportResult> {
+fn run_engine_export(
+    app: &AppHandle,
+    project: &ProjectFile,
+    options: &ExportOptions,
+) -> Result<ExportResult> {
     let engine = engine_dir(app)?;
     let output_path = PathBuf::from(&options.output_path);
     let work_dir = export_work_dir(&output_path);
-    fs::create_dir_all(&work_dir).with_context(|| format!("failed to create {}", work_dir.display()))?;
+    fs::create_dir_all(&work_dir)
+        .with_context(|| format!("failed to create {}", work_dir.display()))?;
 
     let pages = exportable_pages(&project.pages, options);
     if pages.is_empty() {
@@ -989,17 +1222,20 @@ fn infer_data_structure_version(project: &ProjectFile) -> u32 {
             return version;
         }
     }
-    if project
-        .pages
-        .iter()
-        .any(|page| page.manual_quad.as_ref().is_some_and(|quad| !quad.is_empty()))
-    {
+    if project.pages.iter().any(|page| {
+        page.manual_quad
+            .as_ref()
+            .is_some_and(|quad| !quad.is_empty())
+    }) {
         return 1;
     }
     if project.pages.iter().any(|page| {
-        page.candidates
-            .iter()
-            .any(|candidate| candidate.manual_quad.as_ref().is_some_and(|quad| !quad.is_empty()))
+        page.candidates.iter().any(|candidate| {
+            candidate
+                .manual_quad
+                .as_ref()
+                .is_some_and(|quad| !quad.is_empty())
+        })
     }) {
         return CURRENT_DATA_STRUCTURE_VERSION;
     }
@@ -1013,8 +1249,8 @@ fn preferred_project_file_in_dir(_folder_path: &Path) -> Option<PathBuf> {
 fn load_project_file(project_path: &Path) -> Result<ProjectFile> {
     let content = fs::read_to_string(project_path)
         .with_context(|| format!("failed to read {}", project_path.display()))?;
-    let mut project =
-        serde_json::from_str::<ProjectFile>(&content).with_context(|| format!("invalid {}", project_path.display()))?;
+    let mut project = serde_json::from_str::<ProjectFile>(&content)
+        .with_context(|| format!("invalid {}", project_path.display()))?;
     for page in &mut project.pages {
         let current_thumb = page.thumb_path.as_deref().map(Path::new);
         if current_thumb.is_none_or(|thumb| !thumb.exists()) {
@@ -1027,7 +1263,11 @@ fn load_project_file(project_path: &Path) -> Result<ProjectFile> {
 }
 
 #[tauri::command]
-async fn scan_folder(app: AppHandle, folder_path: String, scan_id: u64) -> Result<ProjectFile, String> {
+async fn scan_folder(
+    app: AppHandle,
+    folder_path: String,
+    scan_id: u64,
+) -> Result<ProjectFile, String> {
     build_project(&app, Path::new(&folder_path), scan_id).map_err(|err| err.to_string())
 }
 
@@ -1068,6 +1308,101 @@ async fn export_project(
     options: ExportOptions,
 ) -> Result<ExportResult, String> {
     run_engine_export(&app, &project, &options).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_update_state<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<UpdateStatePayload, String> {
+    Ok(current_update_snapshot(
+        &app.package_info().version.to_string(),
+    ))
+}
+
+#[tauri::command]
+async fn check_for_app_update<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<UpdateStatePayload, String> {
+    let current_version = app.package_info().version.to_string();
+    {
+        let mut manager = lock_update_manager()?;
+        manager.snapshot = UpdateStatePayload {
+            status: UpdateStatus::Checking,
+            update: None,
+            progress: None,
+            error: None,
+        };
+    }
+
+    let snapshot = match fetch_update(&app).await {
+        Ok(Some(update)) => UpdateStatePayload {
+            status: UpdateStatus::Available,
+            update: Some(to_update_info_payload(&current_version, &update)),
+            progress: None,
+            error: None,
+        },
+        Ok(None) => UpdateStatePayload {
+            status: UpdateStatus::UpToDate,
+            update: None,
+            progress: None,
+            error: None,
+        },
+        Err(err) => UpdateStatePayload {
+            status: UpdateStatus::Error,
+            update: None,
+            progress: None,
+            error: Some(err),
+        },
+    };
+    let mut manager = lock_update_manager()?;
+    manager.snapshot = snapshot.clone();
+    Ok(snapshot)
+}
+
+#[tauri::command]
+async fn install_app_update<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    version: String,
+) -> Result<UpdateStatePayload, String> {
+    let current_version = app.package_info().version.to_string();
+    let update = fetch_update(&app)
+        .await?
+        .ok_or_else(|| "当前没有可安装的更新。".to_string())?;
+    let payload = to_update_info_payload(&current_version, &update);
+    if payload.version != version {
+        return Err("更新版本不匹配，请重新检查更新后再试。".to_string());
+    }
+    {
+        let mut manager = lock_update_manager()?;
+        manager.snapshot = UpdateStatePayload {
+            status: UpdateStatus::Downloading,
+            update: Some(payload.clone()),
+            progress: Some(UpdateProgressPayload::default()),
+            error: None,
+        };
+    }
+
+    let snapshot = match download_and_install_update(update, &current_version).await {
+        Ok(()) => UpdateStatePayload {
+            status: UpdateStatus::Ready,
+            update: Some(payload),
+            progress: Some(UpdateProgressPayload {
+                percent: 100.0,
+                total: 0,
+                transferred: 0,
+            }),
+            error: None,
+        },
+        Err(err) => UpdateStatePayload {
+            status: UpdateStatus::Error,
+            update: Some(payload),
+            progress: None,
+            error: Some(err),
+        },
+    };
+    let mut manager = lock_update_manager()?;
+    manager.snapshot = snapshot.clone();
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -1204,9 +1539,13 @@ mod tests {
             tag_summary: None,
             pages: vec![sample_page("page-1", "reviewed", 0.9)],
         };
-        project.pages[0].candidates[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
+        project.pages[0].candidates[0].manual_quad =
+            Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
 
-        assert_eq!(infer_data_structure_version(&project), CURRENT_DATA_STRUCTURE_VERSION);
+        assert_eq!(
+            infer_data_structure_version(&project),
+            CURRENT_DATA_STRUCTURE_VERSION
+        );
     }
 
     #[test]
@@ -1226,7 +1565,10 @@ mod tests {
         };
         project.pages[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
 
-        assert_eq!(infer_data_structure_version(&project), CURRENT_DATA_STRUCTURE_VERSION);
+        assert_eq!(
+            infer_data_structure_version(&project),
+            CURRENT_DATA_STRUCTURE_VERSION
+        );
     }
 
     #[test]
@@ -1245,11 +1587,15 @@ mod tests {
             pages: vec![sample_page("page-1", "reviewed", 0.9)],
         };
 
-        assert_eq!(infer_data_structure_version(&project), CURRENT_DATA_STRUCTURE_VERSION);
+        assert_eq!(
+            infer_data_structure_version(&project),
+            CURRENT_DATA_STRUCTURE_VERSION
+        );
     }
 
     #[test]
-    fn infer_data_structure_version_prefers_legacy_when_missing_version_and_both_manual_shapes_exist() {
+    fn infer_data_structure_version_prefers_legacy_when_missing_version_and_both_manual_shapes_exist(
+    ) {
         let mut project = ProjectFile {
             version: 1,
             data_structure_version: None,
@@ -1264,7 +1610,8 @@ mod tests {
             pages: vec![sample_page("page-1", "reviewed", 0.9)],
         };
         project.pages[0].manual_quad = Some(vec![[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]]);
-        project.pages[0].candidates[0].manual_quad = Some(vec![[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0]]);
+        project.pages[0].candidates[0].manual_quad =
+            Some(vec![[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0]]);
 
         assert_eq!(infer_data_structure_version(&project), 1);
     }
@@ -1288,8 +1635,22 @@ mod tests {
         assert_eq!(value["manualQuad"][0][0], 1.0);
 
         let decoded: Candidate = serde_json::from_value(value).expect("deserialize candidate");
-        assert_eq!(decoded.original_quad.as_ref().and_then(|quad| quad.first()).map(|point| point[0]), Some(0.0));
-        assert_eq!(decoded.manual_quad.as_ref().and_then(|quad| quad.first()).map(|point| point[0]), Some(1.0));
+        assert_eq!(
+            decoded
+                .original_quad
+                .as_ref()
+                .and_then(|quad| quad.first())
+                .map(|point| point[0]),
+            Some(0.0)
+        );
+        assert_eq!(
+            decoded
+                .manual_quad
+                .as_ref()
+                .and_then(|quad| quad.first())
+                .map(|point| point[0]),
+            Some(1.0)
+        );
     }
 
     #[test]
@@ -1329,8 +1690,14 @@ mod tests {
             },
         );
 
-        let ids = selected.iter().map(|page| page.id.as_str()).collect::<Vec<_>>();
-        assert_eq!(ids, vec!["reviewed", "needs-review", "trusted", "untrusted"]);
+        let ids = selected
+            .iter()
+            .map(|page| page.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["reviewed", "needs-review", "trusted", "untrusted"]
+        );
     }
 
     #[test]
@@ -1354,7 +1721,10 @@ mod tests {
             },
         );
 
-        let ids = selected.iter().map(|page| page.id.as_str()).collect::<Vec<_>>();
+        let ids = selected
+            .iter()
+            .map(|page| page.id.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(ids, vec!["reviewed"]);
     }
 
@@ -1374,7 +1744,8 @@ mod tests {
 
     #[test]
     fn ocr_languages_fall_back_to_available_values() {
-        let resolved = resolve_ocr_languages("chi_sim+eng", &["eng".to_string(), "osd".to_string()]);
+        let resolved =
+            resolve_ocr_languages("chi_sim+eng", &["eng".to_string(), "osd".to_string()]);
         assert_eq!(resolved, "eng");
 
         let resolved_with_match =
@@ -1386,7 +1757,9 @@ mod tests {
     fn bundled_python_candidates_cover_tauri_resource_layout() {
         let engine = Path::new("/tmp/Resources/_up_/engine");
         let candidates = bundled_python_candidates(engine);
-        assert!(candidates.iter().any(|value| value.ends_with("vendor/macos/bin/python3")));
+        assert!(candidates
+            .iter()
+            .any(|value| value.ends_with("vendor/macos/bin/python3")));
     }
 
     #[test]
@@ -1403,8 +1776,10 @@ mod tests {
         let target = nested_engine.join("detect_frame.py");
         fs::write(&target, "print('ok')\n").unwrap();
 
-        let resolved =
-            resolve_resource_path_from_base(&base, Path::new("engine").join("detect_frame.py").as_path());
+        let resolved = resolve_resource_path_from_base(
+            &base,
+            Path::new("engine").join("detect_frame.py").as_path(),
+        );
 
         assert_eq!(resolved.as_deref(), Some(target.as_path()));
 
@@ -1502,11 +1877,19 @@ mod tests {
         };
 
         let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value.get("output_path").and_then(|item| item.as_str()), Some("/tmp/out.pdf"));
-        assert_eq!(value.get("work_dir").and_then(|item| item.as_str()), Some("/tmp/work"));
+        assert_eq!(
+            value.get("output_path").and_then(|item| item.as_str()),
+            Some("/tmp/out.pdf")
+        );
+        assert_eq!(
+            value.get("work_dir").and_then(|item| item.as_str()),
+            Some("/tmp/work")
+        );
         assert!(value.get("outputPath").is_none());
         assert_eq!(
-            value["options"].get("ocr_languages").and_then(|item| item.as_str()),
+            value["options"]
+                .get("ocr_languages")
+                .and_then(|item| item.as_str()),
             Some("chi_sim+eng")
         );
         assert!(value["options"].get("ocrLanguages").is_none());
@@ -1555,6 +1938,7 @@ mod tests {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             scan_folder,
@@ -1562,7 +1946,10 @@ fn main() {
             save_project,
             load_project,
             generate_preview,
-            export_project
+            export_project,
+            get_update_state,
+            check_for_app_update,
+            install_app_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

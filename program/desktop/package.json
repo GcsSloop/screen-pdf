@@ -1,13 +1,14 @@
 {
   "name": "screen-pdf",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "package:local": "bash ../../scripts/desktop/package_local_release.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

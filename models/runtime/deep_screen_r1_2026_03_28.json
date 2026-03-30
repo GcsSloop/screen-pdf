@@ -1,8 +1,8 @@
 {
   "public_name": "deep_screen_r1_2026_03_28",
   "status": "promoted",
-  "released_at": "2026-03-28",
-  "app_version": "0.2.0",
+  "released_at": "2026-03-30T15:30:45Z",
+  "app_version": "0.2.1",
   "runtime_chain": [
     "global coarse",
     "single ROI refine",
@@ -11,47 +11,50 @@
   "models": {
     "global": {
       "runtime_file": "models/runtime/global_corner_model.pt",
-      "runtime_sha1": "a0052ef23b3f823add754452c0c703146f0c62f3",
-      "source_checkpoint": "training/runs/global_corner_r66_202603_old4_hardpages_from_r63_v1/output/global_corner_model.pt",
-      "model_id": "r66"
+      "runtime_sha1": "3937f07e3e732caaa2bc2e806f4bfee1c4188c5d",
+      "source_checkpoint": "training/runs/global_corner_r85_202603_infocomm_metaverse_focusmerge24x_from_r84_v1/output/checkpoints/epoch_001.pt",
+      "model_id": "r85"
     },
     "roi": {
       "runtime_file": "models/runtime/corner_heatmap_model.pt",
-      "runtime_sha1": "2717cdfed0978ded74777bdf53b4cddcf37a1df1",
-      "source_checkpoint": "training/runs/roi_corner_c12_202603_fuzhou_zhouming_replay_from_r60_v1/output/corner_heatmap_model.pt",
-      "model_id": "c12"
+      "runtime_sha1": "a64d4ad211d3b08bd5b83c9372be15313330033d",
+      "source_checkpoint": "training/runs/roi_corner_c21_202603_r85_weak3_guardmix_from_runtime_v1/output/corner_heatmap_model.pt",
+      "model_id": "c21"
     },
     "local": {
       "runtime_file": "models/runtime/local_corner_moe_coord_model.pt",
-      "runtime_sha1": "35c3eef881947ba1a487099a8315126403a7a0dc",
-      "source_checkpoint": "training/runs/local_corner_r48_202603_openatom_runtime288_inferenceonly_from_r44_v1/output/local_corner_moe_coord_model.pt",
-      "model_id": "r48"
+      "runtime_sha1": "200f39f3b52e1c11a8a72bbb764711f3b72b9ebc",
+      "source_checkpoint": "training/runs/local_corner_r64probe_blend_sweep_20260330/mt065.pt",
+      "model_id": "r64probe_mt065"
     }
   },
   "validation_summary": {
-    "broad_all_787": {
-      "point_error_mean": 0.0078,
-      "point_le_0_01_ratio": 0.8812,
-      "point_le_0_05_ratio": 0.9822,
-      "max_corner_le_0_03_ratio": 0.8971
+    "zeng": {
+      "point_error_mean": 0.0099,
+      "point_le_0_01_ratio": 0.8375
     },
-    "broad_non_focus_754": {
-      "point_error_mean": 0.008,
-      "point_le_0_01_ratio": 0.8773,
-      "point_le_0_05_ratio": 0.9814,
-      "max_corner_le_0_03_ratio": 0.8939
+    "novastar": {
+      "point_error_mean": 0.0095,
+      "point_le_0_01_ratio": 0.7917
     },
-    "focus_test_9": {
-      "point_error_mean": 0.0034,
-      "point_le_0_01_ratio": 0.9722,
-      "point_le_0_05_ratio": 1.0,
-      "max_corner_le_0_03_ratio": 1.0
+    "openatom": {
+      "point_error_mean": 0.011,
+      "point_le_0_01_ratio": 0.8231
+    },
+    "road_led": {
+      "point_error_mean": 0.0123,
+      "point_le_0_01_ratio": 0.7174
+    },
+    "hangzhou_zhongkong": {
+      "point_error_mean": 0.0199,
+      "point_le_0_01_ratio": 0.6029
     }
   },
   "references": {
-    "runtime_best_report": "training/reports/2026-03-29-broad-old-plus-fuzhou-r66-balanced.json",
-    "candidate_reject_report_r67": "training/reports/2026-03-29-broad-old-plus-fuzhou-r67-balanced.json",
-    "candidate_reject_report_r68": "training/reports/2026-03-29-broad-old-plus-fuzhou-r68-balanced.json"
+    "training_report": "training/reports/2026-03-30-r85-c21-r64probe-novastar-openatom-led-plus-guard3-compare.json",
+    "blend_report": "training/reports/2026-03-30-r85-c21-r64probe-mt065-compare.json"
   },
-  "notes": "Pinned runtime release to the current best three-stage stack for the real teacher_current flow: r66 coarse + c12 ROI + r48 local. Runtime still loads the flat compatibility filenames in models/runtime; this manifest binds those files to the promoted release name deep_screen_r1_2026_03_28."
+  "notes": "Balanced packaged runtime for app version 0.2.1: r85 global + c21 ROI + r64probe local with max_trust=0.65 blend. This variant keeps the newly added weak targets above their requested floor while pulling Hangzhou Zhongkong back above 0.60 without retraining the runtime files again.",
+  "model_release_id": "model-20260330-153045-e60e199b",
+  "runtime_digest": "e60e199b81ba3075b4afd484a3551a3b872ee1cb"
 }

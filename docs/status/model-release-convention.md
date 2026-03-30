@@ -1,87 +1,75 @@
 # Model Release Convention
 
-这份文档把“统一蒸馏模型”从训练记录、发布命名到 runtime 落盘方式统一起来，避免后续只改一层而其他层继续沿用旧约定。
+这份文档定义 runtime manifest、训练 registry、git tag 和桌面程序之间如何共享同一个模型发布语义。
 
-## 关系说明
+## 目标
 
-- `model-naming-rules.md` 负责定义名字本身。
-- 本文负责定义这些名字怎么进入训练注册表、怎么落到 runtime 目录、怎么被程序消费。
+- 保留现有内部训练命名体系，不打断训练流程。
+- 对外只暴露一个统一模型发布编号。
+- 程序版本更新和模型版本更新彻底解耦。
 
-## Registry 字段
+## 核心字段
 
-每个正式发布版本都应该在 `training/registry/` 下拥有一条记录，字段建议如下：
+每个正式 runtime 发布都应在 `models/runtime/*.json` 和 `training/registry/*.json` 中记录：
 
 | 字段 | 含义 |
 | --- | --- |
-| `public_name` | 对外发布名，例如 `deep_screen_v1` |
-| `internal_name` | 内部技术名，例如 `ds_corner_unified_distill_v1` |
-| `status` | 生命周期状态，建议取值：`candidate`、`promoted`、`rejected`、`deprecated` |
-| `teacher_models` | 蒸馏教师模型列表 |
-| `training_dataset` | 训练数据集标识 |
-| `validation_summary` | 验证指标摘要 |
-| `runtime_files` | 要进入 `models/runtime` 的文件列表 |
-| `promoted_at` | 晋升时间 |
-| `notes` | 备注 |
+| `public_name` | 人类可读别名，例如 `deep_screen_r1_2026_03_28` |
+| `model_release_id` | 对外统一模型发布编号，例如 `model-20260330-153045-ab12cd34` |
+| `runtime_digest` | 基于 runtime 三阶段模型清单计算出的统一摘要 |
+| `teacher_models` | 三阶段组合来源 |
+| `validation_summary` | 关键指标摘要 |
+| `runtime_files` | 运行时依赖文件 |
+| `status` | 生命周期状态，例如 `promoted` |
+| `promoted_at` / `released_at` | 晋升或发布时间 |
 
-## 锁定主线
+## 发布边界
 
-当前已经锁定的统一蒸馏主线是：
+### 程序发布
 
-- `public_name = deep_screen_v1`
-- `internal_name = ds_corner_unified_distill_v1`
-- `teacher_models = [r3, v28]`
+- git tag 形式：`v*`
+- 会同步桌面端版本号
+- 会触发多平台程序打包
+- 会生成并发布 `latest.json`
+- 会触发桌面端自动更新链路
 
-当前首轮演进目录是：
+### 模型发布
 
-```text
-training/runs/deep_screen_v1/round_001/
-```
-
-## Registry 记录原则
-
-1. `public_name` 和 `internal_name` 必须一一对应。
-2. `runtime_files` 里记录的是最终发布时真正放进 runtime 目录的文件名。
-3. 只有 `status=promoted` 的模型，才允许进入 runtime 默认集合。
-4. `candidate` 只能留在训练/实验侧，不应作为默认发布版本。
-5. `rejected` 和 `deprecated` 只保留历史记录，不进入默认加载路径。
-6. 每一轮蒸馏、测试和演进数据必须放在独立 round 目录中。
+- git tag 形式：`model-*`
+- 只校验当前 promoted runtime manifest
+- 只发布模型元数据
+- 不触发桌面程序编译
 
 ## Runtime 目录约定
 
-当前 `models/runtime` 仍承担两类内容：
+当前 `models/runtime` 仍保留三阶段平铺文件名以保证兼容：
 
-1. 旧的兼容运行时组件。
-2. 未来统一蒸馏模型的正式发布文件。
+- `global_corner_model.pt`
+- `corner_heatmap_model.pt`
+- `local_corner_moe_coord_model.pt`
 
-### 现阶段
+统一发布信息放在 manifest 中，而不是强行改掉兼容文件名。
 
-- 旧链路文件继续保留在 `models/runtime` 平铺目录中。
-- 当前默认加载逻辑仍兼容旧文件名。
+## 程序消费顺序
 
-### 统一模型发布后
+程序显示和日志输出按下面顺序读取模型编号：
 
-统一蒸馏模型正式发布时，运行时目录应优先使用对外发布名：
+1. `model_release_id`
+2. `public_name`
+3. 兼容回退值
 
-```text
-models/runtime/deep_screen_v{major}.pt
-```
+## 当前固定版本
 
-如果需要保留旧组件用于回退或对照，可以继续共存，但它们必须明确标记为兼容资产，而不是正式发布入口。
+- `public_name = deep_screen_r1_2026_03_28`
+- `model_release_id = model-20260330-153045-e60e199b`
+- app 版本线：`v0.2.1`
 
-## 推荐映射
+## 晋升动作
 
-正式记录建议按下面方式对齐：
+当新的 runtime 组合被晋升时，至少要同步：
 
-- 对外名：`deep_screen_v1`
-- 内部名：`ds_corner_unified_distill_v1`
-- runtime 文件：`models/runtime/deep_screen_v1.pt`
-- registry 文件：`training/registry/deep_screen_v1.json`
-
-## 现阶段过渡原则
-
-1. 在统一模型真正接管默认链路之前，不要删除当前旧 runtime 文件。
-2. 新的统一模型只要晋升，就必须同时更新：
-   - `training/registry`
-   - `models/runtime`
-   - `docs/status/current-status.md`
-3. 如果同一版本既有内部权重名又有对外发布名，发布名优先用于 runtime 和用户入口，内部名优先用于训练与审计。
+1. 更新 `models/runtime/*.json`
+2. 更新 `training/registry/*.json`
+3. 生成新的 `model_release_id`
+4. 记录新的 `runtime_digest`
+5. 视需要推送 `model-*` tag
