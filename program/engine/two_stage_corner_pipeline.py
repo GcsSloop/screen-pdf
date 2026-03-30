@@ -247,11 +247,13 @@ class LocalCornerMoEPredictor:
         self.coord_mix = float(checkpoint.get("coord_mix", 0.25))
         self.use_visibility = any(str(key).startswith("visibility_heads.") for key in checkpoint["state_dict"].keys())
         self.use_coord_model = "coord_mix" in checkpoint or model_path.name == "local_corner_moe_coord_model.pt"
+        self.input_channels = int(checkpoint.get("input_channels", 10) or 10)
         if self.use_coord_model:
             self.model = LocalCornerMoECoordNet(
                 channels=int(checkpoint["channels"]),
                 experts=int(checkpoint["experts"]),
                 metadata_dim=int(checkpoint.get("metadata_dim", 0) or 0),
+                input_channels=self.input_channels,
             )
             missing, unexpected = self.model.load_state_dict(checkpoint["state_dict"], strict=False)
             allowed_missing = [
@@ -279,13 +281,79 @@ class LocalCornerMoEPredictor:
         self._build_patch_features = build_patch_features
         self._decode_moe_output = decode_moe_output
         self._decode_moe_coord_output = decode_moe_coord_output
+        patch_config = checkpoint.get("local_patch_config", {})
+        self.local_patch_config = {
+            "patch_scale": float(patch_config.get("patch_scale", checkpoint.get("patch_scale", 0.2))),
+            "patch_min": int(patch_config.get("patch_min", checkpoint.get("patch_min", 96))),
+            "patch_max": int(patch_config.get("patch_max", checkpoint.get("patch_max", 256))),
+            "bottom_vertical_bias": float(
+                patch_config.get("bottom_vertical_bias", checkpoint.get("bottom_vertical_bias", 0.0))
+            ),
+            "bl_patch_scale_multiplier": float(
+                patch_config.get("bl_patch_scale_multiplier", checkpoint.get("bl_patch_scale_multiplier", 1.0))
+            ),
+            "bl_bottom_vertical_bias": float(
+                patch_config.get("bl_bottom_vertical_bias", checkpoint.get("bl_bottom_vertical_bias", 0.0))
+            ),
+        }
+        blend_config = checkpoint.get("local_blend_config", {})
+        default_blend_enabled = self.use_coord_model and self.use_visibility
+        self.local_blend_config = {
+            "enabled": bool(blend_config.get("enabled", default_blend_enabled)),
+            "visibility_scale": float(blend_config.get("visibility_scale", 1.5)),
+            "visibility_pow": float(blend_config.get("visibility_pow", 1.0)),
+            "gate_pow": float(blend_config.get("gate_pow", 0.0)),
+            "displacement_weight": float(blend_config.get("displacement_weight", 4.0)),
+            "max_trust": float(blend_config.get("max_trust", 0.7)),
+            "min_trust": float(blend_config.get("min_trust", 0.0)),
+            "page_fallback_visibility_mean": float(blend_config.get("page_fallback_visibility_mean", 0.0)),
+            "page_fallback_visibility_min": float(blend_config.get("page_fallback_visibility_min", 0.0)),
+        }
 
-    def __call__(self, image_path: Path, predicted_quad: np.ndarray, image: np.ndarray | None = None) -> np.ndarray:
+    def _compute_corner_trust(
+        self,
+        visibility_mean: float,
+        gate_max: float,
+        displacement: float,
+        patch_size: float,
+    ) -> float:
+        config = self.local_blend_config
+        if not config["enabled"]:
+            return 1.0
+        visibility_term = max(float(visibility_mean), 0.0) ** max(float(config["visibility_pow"]), 0.0)
+        gate_term = max(float(gate_max), 0.0) ** max(float(config["gate_pow"]), 0.0)
+        displacement_norm = float(displacement) / max(float(patch_size), 1.0)
+        raw_trust = float(config["visibility_scale"]) * visibility_term * gate_term
+        raw_trust /= 1.0 + float(config["displacement_weight"]) * max(displacement_norm, 0.0)
+        return float(np.clip(raw_trust, float(config["min_trust"]), float(config["max_trust"])))
+
+    def _should_fallback_page_to_roi(self, visibility_values: list[float]) -> bool:
+        if not visibility_values:
+            return False
+        config = self.local_blend_config
+        visibility_mean = float(np.mean(visibility_values))
+        visibility_min = float(np.min(visibility_values))
+        mean_threshold = float(config.get("page_fallback_visibility_mean", 0.0))
+        min_threshold = float(config.get("page_fallback_visibility_min", 0.0))
+        return (mean_threshold > 0.0 and visibility_mean < mean_threshold) or (
+            min_threshold > 0.0 and visibility_min < min_threshold
+        )
+
+    def predict_with_details(
+        self,
+        image_path: Path,
+        predicted_quad: np.ndarray,
+        image: np.ndarray | None = None,
+    ) -> dict[str, Any]:
         ordered_quad = order_points(np.array(predicted_quad, dtype=np.float32))
         if image is None:
             image = _load_image(image_path)
-        point_norms: list[np.ndarray] = []
+        raw_points: list[np.ndarray] = []
+        blended_points: list[np.ndarray] = []
+        corner_details: list[dict[str, Any]] = []
         patch_samples: list[dict[str, Any]] = []
+        point_norms: list[np.ndarray] = []
+        confidence_rows: list[dict[str, float]] = []
         for corner_index in range(4):
             sample = self._build_local_corner_patch_sample(
                 image_path=image_path,
@@ -295,9 +363,27 @@ class LocalCornerMoEPredictor:
                 predicted_quad=ordered_quad,
                 manual_quad=ordered_quad,
                 patch_size=None,
+                patch_scale=self.local_patch_config["patch_scale"],
+                patch_min=self.local_patch_config["patch_min"],
+                patch_max=self.local_patch_config["patch_max"],
+                bottom_vertical_bias=self.local_patch_config["bottom_vertical_bias"],
+                bl_patch_scale_multiplier=self.local_patch_config["bl_patch_scale_multiplier"],
+                bl_bottom_vertical_bias=self.local_patch_config["bl_bottom_vertical_bias"],
             )
             patch_samples.append(sample)
-            features = self._build_patch_features(np.array(sample["patch_image"], copy=False), corner_index, input_size=self.input_size)
+            if self.use_coord_model:
+                features = self._build_patch_features(
+                    np.array(sample["patch_image"], copy=False),
+                    corner_index,
+                    input_size=self.input_size,
+                    input_channels=self.input_channels,
+                )
+            else:
+                features = self._build_patch_features(
+                    np.array(sample["patch_image"], copy=False),
+                    corner_index,
+                    input_size=self.input_size,
+                )
             tensor = torch.from_numpy(features[None, ...]).to(device=self.device, dtype=torch.float32)
             metadata = None
             if self.metadata_dim > 0:
@@ -307,15 +393,20 @@ class LocalCornerMoEPredictor:
                     "predicted_point": sample["predicted_point"],
                     "predicted_quad": ordered_quad.tolist(),
                 }
-                metadata = torch.from_numpy(self._build_patch_metadata(metadata_row)[None, ...]).to(device=self.device, dtype=torch.float32)
+                metadata = torch.from_numpy(self._build_patch_metadata(metadata_row)[None, ...]).to(
+                    device=self.device, dtype=torch.float32
+                )
+            visibility_mean = 1.0
+            gate_max = 1.0
             with torch.no_grad():
                 if self.use_coord_model:
-                    heatmaps, offsets, coord_head, _, _, visibility, _ = self.model(tensor, metadata)
+                    heatmaps, offsets, coord_head, _, _, visibility, gates = self.model(tensor, metadata)
                     decoded = self._decode_moe_coord_output(heatmaps, offsets, coord_head, coord_mix=0.0)
                     if self.use_visibility:
                         visibility_score = torch.clamp(visibility.mean(dim=-1, keepdim=True), 0.0, 1.0)
                         adaptive_mix = torch.clamp(self.coord_mix * 0.35 + visibility_score * 0.65, 0.05, 0.9)
                         point = torch.clamp(decoded * (1.0 - adaptive_mix) + coord_head * adaptive_mix, 0.0, 1.0).cpu().numpy()[0]
+                        visibility_mean = float(torch.clamp(visibility.mean(), 0.0, 1.0).cpu().item())
                     else:
                         point = self._decode_moe_coord_output(
                             heatmaps,
@@ -323,25 +414,73 @@ class LocalCornerMoEPredictor:
                             coord_head,
                             coord_mix=self.coord_mix,
                         ).cpu().numpy()[0]
+                    gate_max = float(torch.clamp(gates.max(), 0.0, 1.0).cpu().item())
                 else:
                     heatmaps, offsets, _ = self.model(tensor, metadata)
                     point = self._decode_moe_output(heatmaps, offsets).cpu().numpy()[0]
             point_norms.append(point.astype(np.float32))
-        points: list[list[float]] = []
-        for sample, point_norm in zip(patch_samples, point_norms, strict=True):
+            confidence_rows.append({"visibility_mean": visibility_mean, "gate_max": gate_max})
+        for corner_index, (sample, point_norm, confidence_row) in enumerate(
+            zip(patch_samples, point_norms, confidence_rows, strict=True)
+        ):
             patch = sample["patch"]
-            points.append(
+            raw_point = np.array(
                 [
                     float(patch["x"] + point_norm[0] * patch["size"]),
                     float(patch["y"] + point_norm[1] * patch["size"]),
-                ]
+                ],
+                dtype=np.float32,
             )
-        return order_points(np.array(points, dtype=np.float32))
+            roi_point = ordered_quad[corner_index].astype(np.float32)
+            displacement = float(np.linalg.norm(raw_point - roi_point))
+            trust = self._compute_corner_trust(
+                visibility_mean=confidence_row["visibility_mean"],
+                gate_max=confidence_row["gate_max"],
+                displacement=displacement,
+                patch_size=float(patch["size"]),
+            )
+            blended_point = roi_point * (1.0 - trust) + raw_point * trust
+            raw_points.append(raw_point)
+            blended_points.append(blended_point.astype(np.float32))
+            corner_details.append(
+                {
+                    "corner_index": corner_index,
+                    "patch_size": float(patch["size"]),
+                    "visibility_mean": float(confidence_row["visibility_mean"]),
+                    "gate_max": float(confidence_row["gate_max"]),
+                    "displacement": displacement,
+                    "trust": trust,
+                    "roi_point": [float(roi_point[0]), float(roi_point[1])],
+                    "raw_point": [float(raw_point[0]), float(raw_point[1])],
+                    "blended_point": [float(blended_point[0]), float(blended_point[1])],
+                }
+            )
+        if self._should_fallback_page_to_roi([item["visibility_mean"] for item in corner_details]):
+            fallback_quad = order_points(ordered_quad.astype(np.float32))
+            return {
+                "quad": fallback_quad,
+                "raw_quad": order_points(np.array(raw_points, dtype=np.float32)),
+                "corner_details": corner_details,
+            }
+        return {
+            "quad": order_points(np.array(blended_points, dtype=np.float32)),
+            "raw_quad": order_points(np.array(raw_points, dtype=np.float32)),
+            "corner_details": corner_details,
+        }
+
+    def __call__(self, image_path: Path, predicted_quad: np.ndarray, image: np.ndarray | None = None) -> np.ndarray:
+        return self.predict_with_details(image_path=image_path, predicted_quad=predicted_quad, image=image)["quad"]
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
     path.write_text(text + ("\n" if text else ""), encoding="utf-8")
+
+
+def _write_roi_png(path: Path, image: np.ndarray) -> None:
+    ok = cv2.imwrite(str(path), image, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+    if not ok:
+        raise RuntimeError(f"failed to write roi image: {path}")
 
 
 def export_refine_dataset_from_global_predictions(
@@ -354,19 +493,23 @@ def export_refine_dataset_from_global_predictions(
     output_dir.mkdir(parents=True, exist_ok=True)
     exported: dict[str, list[dict[str, Any]]] = {"train": [], "test": []}
     for split_name in ("train", "test"):
+        cached_requests: dict[str, dict[str, Any]] = {}
         rows = [json.loads(line) for line in (split_dir / f"{split_name}.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
         for row in rows:
             image_path = Path(row["image_path"])
-            request = build_refine_request(
-                image_path=image_path,
-                coarse_quad=predictor(image_path),
-                page_id=str(row.get("page_id") or image_path.stem),
-                expand_ratio=expand_ratio,
-            )
             roi_rel = Path("roi") / split_name / f"{image_path.stem}.png"
             roi_abs = output_dir / roi_rel
-            roi_abs.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(roi_abs), request["roi_image"])
+            request = cached_requests.get(str(image_path))
+            if request is None:
+                request = build_refine_request(
+                    image_path=image_path,
+                    coarse_quad=predictor(image_path),
+                    page_id=str(row.get("page_id") or image_path.stem),
+                    expand_ratio=expand_ratio,
+                )
+                roi_abs.parent.mkdir(parents=True, exist_ok=True)
+                _write_roi_png(roi_abs, request["roi_image"])
+                cached_requests[str(image_path)] = request
             exported[split_name].append(
                 {
                     "split": split_name,

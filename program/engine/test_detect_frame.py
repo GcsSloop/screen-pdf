@@ -20,15 +20,15 @@ class DetectFrameTests(unittest.TestCase):
     def tearDown(self) -> None:
         detect_frame._RUNTIME_RELEASE_MODEL_ID = None
 
-    def test_runtime_release_model_id_reads_promoted_public_name(self) -> None:
+    def test_runtime_release_model_id_prefers_promoted_model_release_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             model_root = Path(temp_dir)
             (model_root / "deep_screen_r1_2026_03_28.json").write_text(
-                '{"public_name":"deep_screen_r1_2026_03_28","status":"promoted"}',
+                '{"public_name":"deep_screen_r1_2026_03_28","model_release_id":"model-20260330-153045-ab12cd34","status":"promoted"}',
                 encoding="utf-8",
             )
             with mock.patch("detect_frame._model_root", return_value=model_root):
-                self.assertEqual(detect_frame.runtime_release_model_id(), "deep_screen_r1_2026_03_28")
+                self.assertEqual(detect_frame.runtime_release_model_id(), "model-20260330-153045-ab12cd34")
 
     def test_run_teacher_detection_uses_runtime_release_name_for_model_id(self) -> None:
         fake_module = types.SimpleNamespace(

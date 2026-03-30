@@ -60,7 +60,22 @@ class CornerSampleDataset(Dataset):
         self.rows = [json.loads(line) for line in lines if line.strip()]
         self._cache: list[dict[str, np.ndarray] | None] | None = None
         if self.cache_images:
-            self._cache = [self._load_base_item(row) for row in self.rows]
+            image_cache: dict[str, np.ndarray] = {}
+            self._cache = []
+            for row in self.rows:
+                roi_path = str(row["roi_path"])
+                cached_image = image_cache.get(roi_path)
+                if cached_image is None:
+                    base = self._load_base_item(row)
+                    cached_image = base["image"]
+                    image_cache[roi_path] = cached_image
+                self._cache.append(
+                    {
+                        "image": cached_image,
+                        "corners": np.array(row["corner_norm"], dtype=np.float32),
+                        "coarse": np.array(row["coarse_quad_norm"], dtype=np.float32),
+                    }
+                )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -98,6 +113,7 @@ class CornerSampleDataset(Dataset):
         if image is None:
             raise FileNotFoundError(image_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
         corners = np.array(row["corner_norm"], dtype=np.float32)
         coarse = np.array(row["coarse_quad_norm"], dtype=np.float32)
         return {
@@ -120,7 +136,6 @@ class CornerSampleDataset(Dataset):
             corners = base["corners"]
             coarse = base["coarse"]
         image, corners, coarse = self._maybe_augment(image, corners, coarse)
-        image = cv2.resize(image, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
         image_f = image.astype(np.float32) / 255.0
         coarse_mask = _draw_polygon_mask(coarse, self.input_size)
         features = np.concatenate([np.transpose(image_f, (2, 0, 1)), coarse_mask[None, ...]], axis=0)
