@@ -79,9 +79,19 @@ jobs:
         run: |
           $runtimeDir = Join-Path $env:RUNNER_TEMP "screen-pdf-runtime"
           New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir "windows\bin") | Out-Null
-          Copy-Item (Get-Command python.exe).Source (Join-Path $runtimeDir "windows\bin\python.exe")
-          Copy-Item (Get-Command tesseract.exe).Source (Join-Path $runtimeDir "windows\bin\tesseract.exe")
-          Copy-Item (Get-Command gswin64c.exe).Source (Join-Path $runtimeDir "windows\bin\gswin64c.exe")
+          $pythonPath = (Get-Command python.exe).Source
+          $tesseractPath = @(
+            "C:\Program Files\Tesseract-OCR\tesseract.exe",
+            "C:\Chocolatey\bin\tesseract.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $ghostscriptPath = Get-ChildItem "C:\Program Files\gs\*\bin\gswin64c.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $tesseractPath) { throw "tesseract.exe not found after installation" }
+          if (-not $ghostscriptPath) { throw "gswin64c.exe not found after installation" }
+          Copy-Item $pythonPath (Join-Path $runtimeDir "windows\bin\python.exe")
+          Copy-Item $tesseractPath (Join-Path $runtimeDir "windows\bin\tesseract.exe")
+          Copy-Item $ghostscriptPath (Join-Path $runtimeDir "windows\bin\gswin64c.exe")
           "SCREEN_PDF_RUNTIME_SOURCE_DIR=$runtimeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Package desktop app
         shell: bash
