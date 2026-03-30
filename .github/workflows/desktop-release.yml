@@ -88,7 +88,7 @@ jobs:
       - name: Install OCR dependencies
         shell: powershell
         run: |
-          choco install tesseract ghostscript -y
+          choco install tesseract -y
       - name: Build temporary runtime tree
         shell: powershell
         run: |
@@ -99,11 +99,20 @@ jobs:
             "C:\Program Files\Tesseract-OCR\tesseract.exe",
             "C:\Chocolatey\bin\tesseract.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          $ghostscriptPath = Get-ChildItem "C:\Program Files\gs\*\bin\gswin64c.exe" -ErrorAction SilentlyContinue |
+          $ghostscriptInstallerUrl = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10070/gs10070w64.exe"
+          $ghostscriptInstallerPath = Join-Path $env:RUNNER_TEMP "gs10070w64.exe"
+          $ghostscriptExtractDir = Join-Path $env:RUNNER_TEMP "ghostscript-extract"
+          $sevenZipPath = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $tesseractPath) { throw "tesseract.exe not found after installation" }
+          if (-not $sevenZipPath) { throw "7z.exe not found on runner" }
+          Invoke-WebRequest -Uri $ghostscriptInstallerUrl -OutFile $ghostscriptInstallerPath
+          New-Item -ItemType Directory -Force -Path $ghostscriptExtractDir | Out-Null
+          & $sevenZipPath x $ghostscriptInstallerPath "-o$ghostscriptExtractDir" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "failed to extract Ghostscript installer with 7z" }
+          $ghostscriptPath = Get-ChildItem $ghostscriptExtractDir -Recurse -Filter "gswin64c.exe" -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending |
             Select-Object -First 1 -ExpandProperty FullName
-          if (-not $tesseractPath) { throw "tesseract.exe not found after installation" }
-          if (-not $ghostscriptPath) { throw "gswin64c.exe not found after installation" }
+          if (-not $ghostscriptPath) { throw "gswin64c.exe not found in extracted Ghostscript installer" }
           Copy-Item $pythonPath (Join-Path $runtimeDir "windows\bin\python.exe")
           Copy-Item $tesseractPath (Join-Path $runtimeDir "windows\bin\tesseract.exe")
           Copy-Item $ghostscriptPath (Join-Path $runtimeDir "windows\bin\gswin64c.exe")
