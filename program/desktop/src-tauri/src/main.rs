@@ -116,8 +116,7 @@ struct ProjectFile {
 
 const CURRENT_DATA_STRUCTURE_VERSION: u32 = 2;
 const UPDATE_POLL_CHUNK_SIZE: usize = 64 * 1024;
-const UPDATER_PUBKEY_BASE64: &str =
-    "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1RDYwNjI4MUMzQkFDMTIKUldRU3JEc2NLQWJXMWExcTZrWDVtT2dLRmtCQURPSmVqZ0Q5cWd5bWhZd3F1cnRBbE5KWEQwS2EK";
+const TAURI_CONFIG_JSON: &str = include_str!("../tauri.conf.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "snake_case", deserialize = "camelCase"))]
@@ -265,6 +264,23 @@ struct UpdateStatePayload {
     update: Option<UpdateInfoPayload>,
     progress: Option<UpdateProgressPayload>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EmbeddedTauriConfig {
+    plugins: Option<EmbeddedPluginConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EmbeddedPluginConfig {
+    updater: Option<EmbeddedUpdaterConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EmbeddedUpdaterConfig {
+    pubkey: String,
+    #[serde(default)]
+    endpoints: Vec<String>,
 }
 
 #[derive(Default)]
@@ -533,8 +549,30 @@ fn decode_base64_to_string(value: &str) -> Result<String, String> {
         .map(|text| text.to_string())
 }
 
+fn embedded_updater_config() -> Result<&'static EmbeddedUpdaterConfig, String> {
+    static CONFIG_CACHE: OnceLock<Result<EmbeddedUpdaterConfig, String>> = OnceLock::new();
+    match CONFIG_CACHE.get_or_init(|| {
+        let config: EmbeddedTauriConfig = serde_json::from_str(TAURI_CONFIG_JSON)
+            .map_err(|err| format!("parse embedded tauri.conf.json failed: {err}"))?;
+        let updater = config
+            .plugins
+            .and_then(|plugins| plugins.updater)
+            .ok_or_else(|| "embedded tauri.conf.json missing plugins.updater".to_string())?;
+        if updater.pubkey.trim().is_empty() {
+            return Err("embedded tauri.conf.json updater pubkey is empty".to_string());
+        }
+        if updater.endpoints.is_empty() {
+            return Err("embedded tauri.conf.json updater endpoints are empty".to_string());
+        }
+        Ok(updater)
+    }) {
+        Ok(config) => Ok(config),
+        Err(err) => Err(err.clone()),
+    }
+}
+
 fn verify_update_signature(data: &[u8], release_signature: &str) -> Result<(), String> {
-    let pub_key = decode_base64_to_string(UPDATER_PUBKEY_BASE64)?;
+    let pub_key = decode_base64_to_string(&embedded_updater_config()?.pubkey)?;
     let public_key = PublicKey::decode(&pub_key)
         .map_err(|err| format!("decode updater public key failed: {err}"))?;
     let signature_text = decode_base64_to_string(release_signature)?;
@@ -544,6 +582,27 @@ fn verify_update_signature(data: &[u8], release_signature: &str) -> Result<(), S
         .verify(data, &signature, true)
         .map_err(|err| format!("verify update signature failed: {err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod updater_config_tests {
+    use super::*;
+
+    #[test]
+    fn embedded_updater_config_is_present() {
+        let config = embedded_updater_config().expect("embedded updater config should load");
+        assert!(!config.pubkey.trim().is_empty());
+        assert!(config.endpoints.iter().any(|value| value
+            == "https://github.com/GcsSloop/screen-pdf/releases/latest/download/latest.json"));
+    }
+
+    #[test]
+    fn embedded_updater_pubkey_decodes_to_minisign_public_key() {
+        let config = embedded_updater_config().expect("embedded updater config should load");
+        let pub_key =
+            decode_base64_to_string(&config.pubkey).expect("pubkey should be valid base64");
+        PublicKey::decode(&pub_key).expect("pubkey should decode as minisign public key");
+    }
 }
 
 async fn download_update_bytes(update: &Update, current_version: &str) -> Result<Vec<u8>, String> {
