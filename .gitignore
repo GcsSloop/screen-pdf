@@ -21,6 +21,12 @@ training/*
 !training/reports/*.md
 !training/registry/
 !training/registry/*.json
+training/reports/*.json
+training/runs/**/artifacts/**
+training/runs/**/checkpoints/**
+training/runs/**/data/**
+training/runs/**/logs/**
+training/runs/**/reports/**
 
 research/*
 !research/README.md
@@ -30,3 +36,4 @@ research/experiments/
 *.ckpt
 *.onnx
 *.safetensors
+tmp_img_*.jpg
