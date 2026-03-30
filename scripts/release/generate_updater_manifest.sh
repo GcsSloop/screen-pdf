@@ -75,13 +75,30 @@ find_asset_by_glob() {
   find "$assets_root" -type f -name "$pattern" | sort | head -n1 || true
 }
 
+find_first_matching_asset() {
+  local path=""
+  local pattern=""
+  for pattern in "$@"; do
+    path="$(find_asset_by_glob "$pattern")"
+    if [[ -n "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 0
+}
+
 read_trimmed_file() {
   local path="$1"
   tr -d '\r\n' <"$path"
 }
 
-mac_path="$(find_asset_by_glob "ScreenPDF_${version}_*.app.tar.gz")"
-windows_path="$(find_asset_by_glob "ScreenPDF_${version}_*_en-US.msi.zip")"
+mac_path="$(find_first_matching_asset \
+  "ScreenPDF_${version}_*.app.tar.gz" \
+  "ScreenPDF.app.tar.gz")"
+windows_path="$(find_first_matching_asset \
+  "ScreenPDF_${version}_*_en-US.msi.zip" \
+  "ScreenPDF_${version}_*_en-US.msi")"
 mac_asset="$(basename "$mac_path")"
 windows_asset="$(basename "$windows_path")"
 mac_sig_path="${mac_path}.sig"
