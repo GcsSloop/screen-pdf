@@ -1,0 +1,61 @@
+name: model-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "model-*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate-model-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate promoted runtime manifest matches tag
+        id: resolve
+        run: |
+          python <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          promoted = []
+          for path in Path("models/runtime").glob("*.json"):
+              payload = json.loads(path.read_text(encoding="utf-8"))
+              if payload.get("status") == "promoted":
+                  promoted.append((path, payload))
+          if not promoted:
+              raise SystemExit("no promoted runtime manifest found")
+          matches = [(path, payload) for path, payload in promoted if payload.get("model_release_id") == tag]
+          if not matches:
+              available = [payload.get("model_release_id") for _, payload in promoted]
+              raise SystemExit(f"tag {tag} does not match promoted runtime manifests: {available}")
+          path, payload = matches[0]
+          registry_path = Path("training/registry") / f"{path.stem}.json"
+          if not registry_path.exists():
+              raise SystemExit(f"registry file not found: {registry_path}")
+          print(f"validated {tag} against {path}")
+          print(json.dumps(payload, ensure_ascii=False, indent=2))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"manifest_path={path.as_posix()}\n")
+              handle.write(f"registry_path={registry_path.as_posix()}\n")
+          PY
+      - name: Stage release metadata
+        run: |
+          mkdir -p release-assets/model
+          cp "${{ steps.resolve.outputs.manifest_path }}" release-assets/model/
+          cp "${{ steps.resolve.outputs.registry_path }}" release-assets/model/
+      - name: Publish model metadata release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/model/*

@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.DS_Store
+.secrets/
+release-assets/
 program/desktop/src-tauri/target/
 program/desktop/src-tauri/gen/
 
@@ -15,8 +17,6 @@ data/*
 
 training/*
 !training/README.md
-!training/runs/
-!training/runs/**
 !training/reports/
 !training/reports/*.md
 !training/registry/

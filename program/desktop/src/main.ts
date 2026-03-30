@@ -71,6 +71,28 @@ import type {
   ScanProgressEvent
 } from "./lib/types";
 
+type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "downloading" | "ready" | "unsupported" | "error";
+
+interface UpdateInfoPayload {
+  body?: string | null;
+  currentVersion: string;
+  date?: string | null;
+  version: string;
+}
+
+interface UpdateProgressPayload {
+  percent: number;
+  total: number;
+  transferred: number;
+}
+
+interface UpdateStatePayload {
+  status: UpdateStatus;
+  update?: UpdateInfoPayload | null;
+  progress?: UpdateProgressPayload | null;
+  error?: string | null;
+}
+
 const state = initialState();
 const toolbarButtonMap = new Map(TOOLBAR_ICON_BUTTONS.map((item) => [item.id, item] as const));
 
@@ -176,6 +198,7 @@ app.innerHTML = `
       <span id="projectName" class="meta-pill project-pill">未打开项目</span>
       <span id="pageCount" class="meta-pill">0 页</span>
       <span id="reviewCount" class="meta-pill accent-pill">0 页待确认</span>
+      <button id="checkUpdateBtn" class="meta-pill update-pill" type="button">检查更新</button>
     </div>
   </div>
   <div class="layout">
@@ -274,6 +297,7 @@ const pageOrderHint = document.querySelector("#pageOrderHint") as HTMLSpanElemen
 const projectName = document.querySelector("#projectName") as HTMLSpanElement;
 const pageCount = document.querySelector("#pageCount") as HTMLSpanElement;
 const reviewCount = document.querySelector("#reviewCount") as HTMLSpanElement;
+const checkUpdateBtn = document.querySelector("#checkUpdateBtn") as HTMLButtonElement;
 const previewImage = document.querySelector("#previewImage") as HTMLImageElement;
 const editorStage = document.querySelector("#editorStage") as HTMLDivElement;
 const editorImage = document.querySelector("#editorImage") as HTMLImageElement;
@@ -305,6 +329,12 @@ let activeViewRequestId = 0;
 let exportPopoverOpen = false;
 let hoverMagnifierHandle: number | null = null;
 let hoverMagnifierTimer: ReturnType<typeof setTimeout> | null = null;
+let updateState: UpdateStatePayload = {
+  status: "idle",
+  update: null,
+  progress: null,
+  error: null
+};
 let scanUiState: {
   visible: boolean;
   cancellable: boolean;
@@ -319,6 +349,108 @@ let scanUiState: {
   total: 0,
   message: "准备开始..."
 };
+
+function updateButtonLabel(payload: UpdateStatePayload): string {
+  switch (payload.status) {
+    case "checking":
+      return "检查更新中...";
+    case "up-to-date":
+      return "已是最新版本";
+    case "available":
+      return `安装更新 ${payload.update?.version ?? ""}`.trim();
+    case "downloading":
+      return payload.progress ? `下载更新 ${payload.progress.percent.toFixed(0)}%` : "正在安装更新...";
+    case "ready":
+      return "更新已就绪，重启生效";
+    case "error":
+      return "更新失败，点击重试";
+    case "unsupported":
+      return "当前平台不支持自动更新";
+    default:
+      return "检查更新";
+  }
+}
+
+function renderUpdateButton() {
+  checkUpdateBtn.textContent = updateButtonLabel(updateState);
+  checkUpdateBtn.classList.toggle("is-available", updateState.status === "available");
+  checkUpdateBtn.classList.toggle("is-error", updateState.status === "error");
+  checkUpdateBtn.classList.toggle("is-ready", updateState.status === "ready");
+  checkUpdateBtn.classList.toggle("is-busy", updateState.status === "checking" || updateState.status === "downloading");
+  checkUpdateBtn.disabled = updateState.status === "checking" || updateState.status === "downloading";
+  const details =
+    updateState.status === "available"
+      ? `发现 ${updateState.update?.version ?? "新版本"}，点击安装`
+      : updateState.status === "ready"
+        ? "更新包已安装，重启程序后生效"
+        : updateState.status === "error"
+          ? updateState.error ?? "自动更新失败"
+          : updateState.update?.body ?? "从 GitHub Release 检查桌面端更新";
+  checkUpdateBtn.title = details;
+}
+
+async function checkForAppUpdate(auto = false) {
+  updateState = {
+    status: "checking",
+    update: updateState.update ?? null,
+    progress: null,
+    error: null
+  };
+  renderUpdateButton();
+  try {
+    updateState = await invoke<UpdateStatePayload>("check_for_app_update");
+  } catch (error) {
+    updateState = {
+      status: "error",
+      update: null,
+      progress: null,
+      error: error instanceof Error ? error.message : String(error)
+    };
+    if (!auto) {
+      window.alert(`检查更新失败：${updateState.error ?? "未知错误"}`);
+    }
+  }
+  renderUpdateButton();
+}
+
+async function installAvailableUpdate() {
+  const version = updateState.update?.version;
+  if (!version) {
+    return;
+  }
+  const confirmed = window.confirm(`检测到桌面版 ${version}，现在开始下载并安装吗？安装完成后需要重启程序生效。`);
+  if (!confirmed) {
+    return;
+  }
+  updateState = {
+    status: "downloading",
+    update: updateState.update,
+    progress: {
+      percent: 0,
+      total: 0,
+      transferred: 0
+    },
+    error: null
+  };
+  renderUpdateButton();
+  try {
+    updateState = await invoke<UpdateStatePayload>("install_app_update", { version });
+    if (updateState.status === "ready") {
+      window.alert(`更新 ${version} 已安装完成，重启程序后生效。`);
+    } else if (updateState.status === "error") {
+      window.alert(`安装更新失败：${updateState.error ?? "未知错误"}`);
+    }
+  } catch (error) {
+    updateState = {
+      status: "error",
+      update: updateState.update,
+      progress: null,
+      error: error instanceof Error ? error.message : String(error)
+    };
+    window.alert(`安装更新失败：${updateState.error ?? "未知错误"}`);
+  }
+  renderUpdateButton();
+}
 
 function showAppError(message: string) {
   exportState = {
@@ -1480,6 +1612,15 @@ cancelScanBtn.addEventListener("click", async () => {
 renderExportSection();
 renderModal();
 renderScanModal();
+renderUpdateButton();
+
+checkUpdateBtn.addEventListener("click", () => {
+  if (updateState.status === "available" && updateState.update?.version) {
+    void installAvailableUpdate();
+    return;
+  }
+  void checkForAppUpdate(false);
+});
 
 previewImage.addEventListener("error", () => {
   if (!previewSourceState) {
@@ -1494,3 +1635,5 @@ previewImage.addEventListener("error", () => {
 void listen<ScanProgressEvent>("scan-progress", (event) => {
   updateScanSession(event.payload.scanId, event.payload);
 });
+
+void checkForAppUpdate(true);
