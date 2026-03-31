@@ -10,6 +10,13 @@ PLATFORM="$(resolve_release_platform "${RELEASE_PLATFORM:-auto}")"
 ASSET_DIR="${RELEASE_ASSET_DIR:-$ROOT_DIR/release-assets}"
 SMOKE_IMAGE="${SCREEN_PDF_SMOKE_IMAGE:-}"
 
+if [[ "$PLATFORM" == "macos" && -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  # Tauri treats "-" as ad-hoc signing on macOS. Normalizing here keeps the
+  # build, DMG, and updater payload on the same signed app bundle.
+  export APPLE_SIGNING_IDENTITY="-"
+  echo "APPLE_SIGNING_IDENTITY not set, defaulting to ad-hoc signing for macOS build"
+fi
+
 case "$PLATFORM" in
   macos)
     if [[ "${SKIP_RUNTIME_PREPARE:-0}" != "1" ]]; then

@@ -70,6 +70,7 @@ cat >"$repo_dir/bin/pnpm" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'pnpm:%s\n' "$*" >>"$CALL_LOG"
+printf 'env:APPLE_SIGNING_IDENTITY=%s\n' "${APPLE_SIGNING_IDENTITY:-}" >>"$CALL_LOG"
 EOF
 chmod +x "$repo_dir/bin/pnpm"
 
@@ -109,6 +110,7 @@ assert_file "$tmp_dir/release-assets/artifact.txt"
 assert_contains "$tmp_dir/calls.log" "prepare-runtime:macos"
 assert_contains "$tmp_dir/calls.log" "sync:"
 assert_contains "$tmp_dir/calls.log" "pnpm:--dir"
+assert_contains "$tmp_dir/calls.log" "env:APPLE_SIGNING_IDENTITY=-"
 assert_contains "$tmp_dir/calls.log" "notarize:macos"
 
 echo "PASS: package_local_release_test"
