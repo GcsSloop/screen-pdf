@@ -35,11 +35,19 @@ esac
 bash "$ROOT_DIR/scripts/release/sync_release_metadata.sh"
 pnpm --dir "$ROOT_DIR/program/desktop" tauri build
 
+if [[ "$PLATFORM" == "macos" ]]; then
+  bash "$ROOT_DIR/scripts/desktop/notarize_macos.sh"
+fi
+
 RELEASE_VERSION="$VERSION" RELEASE_PLATFORM="$PLATFORM" RELEASE_ASSET_DIR="$ASSET_DIR" \
   bash "$ROOT_DIR/scripts/desktop/collect_release_assets.sh"
 
 if [[ "$PLATFORM" == "macos" ]]; then
-  BUNDLE_PATH="$ROOT_DIR/program/desktop/src-tauri/target/release/bundle/macos/ScreenPDF.app"
+  BUNDLE_PATH="$(find "$ROOT_DIR/program/desktop/src-tauri/target/release/bundle/macos" -maxdepth 1 -name '*.app' -type d -print0 | xargs -0 ls -td 2>/dev/null | head -n1 || true)"
+  if [[ -z "$BUNDLE_PATH" ]]; then
+    echo "macOS app bundle not found after tauri build" >&2
+    exit 1
+  fi
   VERIFY_ARGS=(
     --bundle "$BUNDLE_PATH"
     --platform "$PLATFORM"
