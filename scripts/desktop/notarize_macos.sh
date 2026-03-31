@@ -27,7 +27,10 @@ if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
   require_env APPLE_API_ISSUER
 fi
 
-if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+if [[ "${APPLE_SIGNING_IDENTITY:-}" == "-" ]]; then
+  echo "Using ad-hoc codesign for macOS bundle"
+  codesign --force --deep --sign - "$APP_PATH"
+elif [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   echo "Code signing app with Developer ID identity"
   codesign --force --deep --options runtime --timestamp \
     --sign "$APPLE_SIGNING_IDENTITY" \
@@ -38,6 +41,11 @@ else
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+if [[ "${APPLE_SIGNING_IDENTITY:-}" == "-" ]]; then
+  echo "Developer ID identity missing, skip notarization for ad-hoc signed bundle"
+  exit 0
+fi
 
 if [[ -z "${APPLE_API_KEY_PATH:-}" || -z "${APPLE_API_KEY_ID:-}" || -z "${APPLE_API_ISSUER:-}" ]]; then
   echo "Apple notarization credentials are incomplete, skip notarization"
