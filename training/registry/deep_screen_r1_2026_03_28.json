@@ -37,7 +37,8 @@
     "models/runtime/deep_screen_r1_2026_03_28.json"
   ],
   "promoted_at": "2026-03-30T15:30:45Z",
-  "model_release_id": "model-20260330-153045-e60e199b",
+  "released_at": "2026-03-31T15:36:48Z",
+  "model_release_id": "model-20260331-153648-e60e199b",
   "runtime_digest": "e60e199b81ba3075b4afd484a3551a3b872ee1cb",
-  "notes": "Pinned balanced runtime release for app version 0.2.1. This release keeps the existing flat runtime filenames for compatibility while promoting the r85 + c21 + r64probe(mt065) stack under one release name."
+  "notes": "Pinned balanced runtime release for app version 0.2.1. This release keeps the existing flat runtime filenames for compatibility while promoting the r85 + c21 + r64probe(mt065) stack under one release name. On 2026-03-31 the same runtime stack was reissued as the fixed current-best model release for downstream desktop publishing."
 }
