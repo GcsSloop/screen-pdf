@@ -1,7 +1,7 @@
 {
   "public_name": "deep_screen_r1_2026_03_28",
   "status": "promoted",
-  "released_at": "2026-03-30T15:30:45Z",
+  "released_at": "2026-03-31T15:36:48Z",
   "app_version": "0.2.1",
   "runtime_chain": [
     "global coarse",
@@ -54,7 +54,7 @@
     "training_report": "training/reports/2026-03-30-r85-c21-r64probe-novastar-openatom-led-plus-guard3-compare.json",
     "blend_report": "training/reports/2026-03-30-r85-c21-r64probe-mt065-compare.json"
   },
-  "notes": "Balanced packaged runtime for app version 0.2.1: r85 global + c21 ROI + r64probe local with max_trust=0.65 blend. This variant keeps the newly added weak targets above their requested floor while pulling Hangzhou Zhongkong back above 0.60 without retraining the runtime files again.",
-  "model_release_id": "model-20260330-153045-e60e199b",
+  "notes": "Balanced packaged runtime for app version 0.2.1: r85 global + c21 ROI + r64probe local with max_trust=0.65 blend. This variant keeps the newly added weak targets above their requested floor while pulling Hangzhou Zhongkong back above 0.60 without retraining the runtime files again. On 2026-03-31 this same runtime was reissued as the fixed current-best model release for downstream desktop publishing.",
+  "model_release_id": "model-20260331-153648-e60e199b",
   "runtime_digest": "e60e199b81ba3075b4afd484a3551a3b872ee1cb"
 }

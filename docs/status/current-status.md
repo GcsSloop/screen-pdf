@@ -35,7 +35,7 @@
 `2026-03-28` 当前固定 runtime 发布版本：
 
 - `deep_screen_r1_2026_03_28`
-- `model_release_id = model-20260330-153045-e60e199b`
+- `model_release_id = model-20260331-153648-e60e199b`
 - app 版本：`0.2.1`
 - runtime 组合：`r85 + c21 + r64probe(mt065)`
 

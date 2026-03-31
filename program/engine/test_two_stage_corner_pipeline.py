@@ -587,6 +587,137 @@ class TwoStageCornerPipelineTests(unittest.TestCase):
         self.assertEqual(mock_build_request.call_count, 2)
         self.assertEqual(mock_imwrite.call_count, 2)
 
+    def test_predict_two_stage_uses_alternate_expand_ratio_when_baseline_confidence_is_low(self) -> None:
+        test_case = self
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((180, 320, 3), dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+
+            coarse_quad = np.array([[50, 30], [270, 35], [260, 150], [55, 145]], dtype=np.float32)
+            baseline_quad = np.array([[60.0, 35.0], [260.0, 35.0], [260.0, 145.0], [60.0, 145.0]], dtype=np.float32)
+            alt_quad = np.array([[58.0, 33.0], [262.0, 33.0], [262.0, 147.0], [58.0, 147.0]], dtype=np.float32)
+
+            class FakeLocalPredictor:
+                def predict_with_details(self, path: Path, predicted_quad: np.ndarray, image: np.ndarray | None = None) -> dict[str, object]:
+                    del image
+                    test_case.assertEqual(path, image_path)
+                    left = float(np.min(predicted_quad[:, 0]))
+                    if left >= 70.0:
+                        return {
+                            "quad": baseline_quad,
+                            "corner_details": [
+                                {"trust": 0.22, "patch_size": 100.0, "displacement": 40.0},
+                                {"trust": 0.21, "patch_size": 100.0, "displacement": 42.0},
+                                {"trust": 0.20, "patch_size": 100.0, "displacement": 44.0},
+                                {"trust": 0.22, "patch_size": 100.0, "displacement": 41.0},
+                            ],
+                        }
+                    return {
+                        "quad": alt_quad,
+                        "corner_details": [
+                            {"trust": 0.59, "patch_size": 100.0, "displacement": 12.0},
+                            {"trust": 0.58, "patch_size": 100.0, "displacement": 11.0},
+                            {"trust": 0.57, "patch_size": 100.0, "displacement": 13.0},
+                            {"trust": 0.60, "patch_size": 100.0, "displacement": 12.0},
+                        ],
+                    }
+
+                def __call__(self, path: Path, quad: np.ndarray, image: np.ndarray | None = None) -> np.ndarray:
+                    return self.predict_with_details(path, quad, image=image)["quad"]
+
+            def fake_global_predictor(path: Path) -> np.ndarray:
+                self.assertEqual(path, image_path)
+                return coarse_quad
+
+            def fake_roi_predictor(request: dict[str, object]) -> np.ndarray:
+                roi = request["roi"]
+                if int(roi["x"]) <= 32:
+                    return np.array([[0.16, 0.12], [0.86, 0.12], [0.86, 0.88], [0.16, 0.88]], dtype=np.float32)
+                return np.array([[0.10, 0.10], [0.90, 0.10], [0.90, 0.90], [0.10, 0.90]], dtype=np.float32)
+
+            result = predict_two_stage(
+                image_path=image_path,
+                global_predictor=fake_global_predictor,
+                roi_predictor=fake_roi_predictor,
+                local_predictor=FakeLocalPredictor(),
+                expand_ratio=0.08,
+                candidate_expand_ratios=[0.04, 0.08],
+                candidate_baseline_gate=0.45,
+                candidate_min_score_gain=0.03,
+            )
+
+        self.assertEqual(result["selected_expand_ratio"], 0.04)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["final_quad"], [[58.0, 33.0], [262.0, 33.0], [262.0, 147.0], [58.0, 147.0]])
+
+    def test_predict_two_stage_keeps_baseline_when_baseline_confidence_is_high(self) -> None:
+        test_case = self
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((180, 320, 3), dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+
+            coarse_quad = np.array([[50, 30], [270, 35], [260, 150], [55, 145]], dtype=np.float32)
+            baseline_quad = np.array([[60.0, 35.0], [260.0, 35.0], [260.0, 145.0], [60.0, 145.0]], dtype=np.float32)
+            alt_quad = np.array([[58.0, 33.0], [262.0, 33.0], [262.0, 147.0], [58.0, 147.0]], dtype=np.float32)
+
+            class FakeLocalPredictor:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def predict_with_details(self, path: Path, predicted_quad: np.ndarray, image: np.ndarray | None = None) -> dict[str, object]:
+                    del image
+                    test_case.assertEqual(path, image_path)
+                    self.calls += 1
+                    if self.calls in {1, 3}:
+                        return {
+                            "quad": baseline_quad,
+                            "corner_details": [
+                                {"trust": 0.58, "patch_size": 100.0, "displacement": 8.0},
+                                {"trust": 0.57, "patch_size": 100.0, "displacement": 7.0},
+                                {"trust": 0.59, "patch_size": 100.0, "displacement": 8.0},
+                                {"trust": 0.58, "patch_size": 100.0, "displacement": 9.0},
+                            ],
+                        }
+                    return {
+                        "quad": alt_quad,
+                        "corner_details": [
+                            {"trust": 0.62, "patch_size": 100.0, "displacement": 8.0},
+                            {"trust": 0.61, "patch_size": 100.0, "displacement": 7.0},
+                            {"trust": 0.60, "patch_size": 100.0, "displacement": 9.0},
+                            {"trust": 0.63, "patch_size": 100.0, "displacement": 8.0},
+                        ],
+                    }
+
+                def __call__(self, path: Path, quad: np.ndarray, image: np.ndarray | None = None) -> np.ndarray:
+                    return self.predict_with_details(path, quad, image=image)["quad"]
+
+            def fake_global_predictor(path: Path) -> np.ndarray:
+                self.assertEqual(path, image_path)
+                return coarse_quad
+
+            def fake_roi_predictor(request: dict[str, object]) -> np.ndarray:
+                del request
+                return np.array([[0.16, 0.12], [0.86, 0.12], [0.86, 0.88], [0.16, 0.88]], dtype=np.float32)
+
+            result = predict_two_stage(
+                image_path=image_path,
+                global_predictor=fake_global_predictor,
+                roi_predictor=fake_roi_predictor,
+                local_predictor=FakeLocalPredictor(),
+                expand_ratio=0.08,
+                candidate_expand_ratios=[0.04, 0.08],
+                candidate_baseline_gate=0.45,
+                candidate_min_score_gain=0.03,
+            )
+
+        self.assertEqual(result["selected_expand_ratio"], 0.08)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["final_quad"], [[60.0, 35.0], [260.0, 35.0], [260.0, 145.0], [60.0, 145.0]])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,7 +61,7 @@
 ## 当前固定版本
 
 - `public_name = deep_screen_r1_2026_03_28`
-- `model_release_id = model-20260330-153045-e60e199b`
+- `model_release_id = model-20260331-153648-e60e199b`
 - app 版本线：`v0.2.1`
 
 ## 晋升动作
