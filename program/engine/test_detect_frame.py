@@ -19,6 +19,8 @@ import detect_frame
 class DetectFrameTests(unittest.TestCase):
     def tearDown(self) -> None:
         detect_frame._RUNTIME_RELEASE_MODEL_ID = None
+        detect_frame._MODEL_RUNTIME = None
+        detect_frame._DEEP_SCREEN_V1_RUNTIME = None
 
     def test_runtime_release_model_id_prefers_promoted_model_release_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -48,6 +50,36 @@ class DetectFrameTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["method"], "teacher_current")
         self.assertEqual(result["model_id"], "deep_screen_r1_2026_03_28")
+
+    def test_run_teacher_detection_passes_multi_expand_selection_config(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_predict_two_stage(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {
+                "final_quad": [[12.0, 8.0], [148.0, 11.0], [146.0, 92.0], [14.0, 89.0]]
+            }
+
+        fake_module = types.SimpleNamespace(predict_two_stage=fake_predict_two_stage)
+        runtime = {
+            "global_predictor": object(),
+            "roi_predictor": object(),
+            "local_predictor": object(),
+            "candidate_expand_ratios": [0.02, 0.04, 0.06, 0.08, 0.10, 0.12],
+            "candidate_baseline_gate": 0.45,
+            "candidate_min_score_gain": 0.03,
+        }
+        with (
+            mock.patch("detect_frame._get_model_runtime", return_value=runtime),
+            mock.patch.dict(sys.modules, {"two_stage_corner_pipeline": fake_module}),
+        ):
+            result = detect_frame.run_teacher_detection("/tmp/page.jpg", image=np.zeros((100, 160, 3), dtype=np.uint8))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["candidate_expand_ratios"], [0.02, 0.04, 0.06, 0.08, 0.10, 0.12])
+        self.assertEqual(calls[0]["candidate_baseline_gate"], 0.45)
+        self.assertEqual(calls[0]["candidate_min_score_gain"], 0.03)
 
     def test_local_model_path_prefers_coord_model_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

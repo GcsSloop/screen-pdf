@@ -4,7 +4,7 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import cv2
 import numpy as np
@@ -123,6 +123,87 @@ def build_refine_request(
     }
 
 
+def _compute_local_candidate_score(details: dict[str, Any] | None) -> float | None:
+    if not details:
+        return None
+    corner_details = details.get("corner_details")
+    if not isinstance(corner_details, list) or not corner_details:
+        return None
+    trust_values: list[float] = []
+    displacement_norms: list[float] = []
+    for item in corner_details:
+        if not isinstance(item, dict):
+            continue
+        trust = float(item.get("trust", 0.0) or 0.0)
+        displacement = float(item.get("displacement", 0.0) or 0.0)
+        patch_size = max(float(item.get("patch_size", 1.0) or 1.0), 1.0)
+        trust_values.append(trust)
+        displacement_norms.append(displacement / patch_size)
+    if not trust_values or not displacement_norms:
+        return None
+    return float(np.mean(trust_values) - 0.5 * np.mean(displacement_norms))
+
+
+def _should_use_candidate_expand_selection(
+    baseline_score: float | None,
+    best_score: float | None,
+    *,
+    baseline_gate: float,
+    min_score_gain: float,
+) -> bool:
+    if baseline_score is None or best_score is None:
+        return False
+    return (
+        float(baseline_score) < float(baseline_gate)
+        and float(best_score) > float(baseline_score) + float(min_score_gain)
+    )
+
+
+def _run_two_stage_candidate(
+    *,
+    image_path: Path,
+    page_id: str,
+    image: np.ndarray,
+    coarse_quad: np.ndarray,
+    roi_predictor: RoiPredictor,
+    local_predictor: LocalQuadPredictor | None,
+    expand_ratio: float,
+) -> dict[str, Any]:
+    request = build_refine_request(
+        image_path=image_path,
+        coarse_quad=coarse_quad,
+        page_id=page_id,
+        expand_ratio=expand_ratio,
+        image=image,
+    )
+    pred_norm = np.array(roi_predictor(request), dtype=np.float32)
+    roi_quad = apply_roi_prediction(pred_norm, request["roi"], image.shape)
+    final_quad = roi_quad
+    local_details: dict[str, Any] | None = None
+    if local_predictor is not None:
+        predict_with_details = getattr(local_predictor, "predict_with_details", None)
+        if callable(predict_with_details):
+            try:
+                local_details = predict_with_details(image_path=image_path, predicted_quad=roi_quad, image=image)
+            except TypeError:
+                local_details = predict_with_details(image_path, roi_quad, image=image)
+            final_quad = order_points(np.array(local_details.get("quad", roi_quad), dtype=np.float32))
+        else:
+            try:
+                refined = local_predictor(image_path, roi_quad, image=image)
+            except TypeError:
+                refined = local_predictor(image_path, roi_quad)
+            final_quad = order_points(np.array(refined, dtype=np.float32))
+    return {
+        "roi_quad": roi_quad,
+        "final_quad": final_quad,
+        "roi": request["roi"],
+        "expand_ratio": float(expand_ratio),
+        "local_details": local_details,
+        "candidate_score": _compute_local_candidate_score(local_details),
+    }
+
+
 def predict_two_stage(
     image_path: Path,
     global_predictor: QuadPredictor,
@@ -130,6 +211,9 @@ def predict_two_stage(
     local_predictor: LocalQuadPredictor | None = None,
     page_id: str | None = None,
     expand_ratio: float = 0.08,
+    candidate_expand_ratios: Sequence[float] | None = None,
+    candidate_baseline_gate: float = 0.45,
+    candidate_min_score_gain: float = 0.03,
     image: np.ndarray | None = None,
 ) -> dict[str, Any]:
     resolved_page_id = page_id or image_path.stem
@@ -138,29 +222,65 @@ def predict_two_stage(
     predict_image = getattr(global_predictor, "predict_image", None)
     coarse_pred = predict_image(image) if callable(predict_image) else global_predictor(image_path)
     coarse_quad = order_points(np.array(coarse_pred, dtype=np.float32))
-    request = build_refine_request(
+    expand_candidates: list[float] = [float(expand_ratio)]
+    if candidate_expand_ratios:
+        seen: set[float] = set()
+        expand_candidates = []
+        for value in [*candidate_expand_ratios, float(expand_ratio)]:
+            ratio = float(value)
+            if ratio <= 0.0 or ratio in seen:
+                continue
+            seen.add(ratio)
+            expand_candidates.append(ratio)
+        expand_candidates.sort()
+    selected = _run_two_stage_candidate(
         image_path=image_path,
-        coarse_quad=coarse_quad,
         page_id=resolved_page_id,
-        expand_ratio=expand_ratio,
         image=image,
+        coarse_quad=coarse_quad,
+        roi_predictor=roi_predictor,
+        local_predictor=local_predictor,
+        expand_ratio=float(expand_ratio),
     )
-    pred_norm = np.array(roi_predictor(request), dtype=np.float32)
-    roi_quad = apply_roi_prediction(pred_norm, request["roi"], image.shape)
-    final_quad = roi_quad
-    if local_predictor is not None:
-        try:
-            refined = local_predictor(image_path, roi_quad, image=image)
-        except TypeError:
-            refined = local_predictor(image_path, roi_quad)
-        final_quad = order_points(np.array(refined, dtype=np.float32))
+    if len(expand_candidates) > 1 and local_predictor is not None and callable(getattr(local_predictor, "predict_with_details", None)):
+        candidates = [
+            _run_two_stage_candidate(
+                image_path=image_path,
+                page_id=resolved_page_id,
+                image=image,
+                coarse_quad=coarse_quad,
+                roi_predictor=roi_predictor,
+                local_predictor=local_predictor,
+                expand_ratio=ratio,
+            )
+            for ratio in expand_candidates
+        ]
+        baseline = next(
+            (item for item in candidates if abs(float(item["expand_ratio"]) - float(expand_ratio)) <= 1e-9),
+            candidates[0],
+        )
+        best = max(
+            candidates,
+            key=lambda item: float(item["candidate_score"]) if item["candidate_score"] is not None else float("-inf"),
+        )
+        if _should_use_candidate_expand_selection(
+            baseline["candidate_score"],
+            best["candidate_score"],
+            baseline_gate=candidate_baseline_gate,
+            min_score_gain=candidate_min_score_gain,
+        ):
+            selected = best
+        else:
+            selected = baseline
     return {
         "page_id": resolved_page_id,
         "image_path": str(image_path),
         "coarse_quad": coarse_quad.tolist(),
-        "roi_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in roi_quad],
-        "final_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in final_quad],
-        "roi": request["roi"],
+        "roi_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in selected["roi_quad"]],
+        "final_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in selected["final_quad"]],
+        "roi": selected["roi"],
+        "selected_expand_ratio": round(float(selected["expand_ratio"]), 4),
+        "candidate_count": len(expand_candidates),
     }
 
 

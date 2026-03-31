@@ -20,6 +20,10 @@ _MODEL_RUNTIME: dict[str, object] | None = None
 _DEEP_SCREEN_V1_RUNTIME: dict[str, object] | None = None
 _RUNTIME_RELEASE_MODEL_ID: str | None = None
 
+TEACHER_MULTI_EXPAND_RATIOS = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12]
+TEACHER_CANDIDATE_BASELINE_GATE = 0.45
+TEACHER_CANDIDATE_MIN_SCORE_GAIN = 0.03
+
 
 def to_plain_candidate(candidate: dict) -> dict:
     return {
@@ -315,6 +319,9 @@ def _get_model_runtime() -> dict[str, object] | None:
             "global_predictor": GlobalCornerPredictor(_model_path("global_corner_model.pt")),
             "roi_predictor": RoiCornerPredictor(_model_path("corner_heatmap_model.pt")),
             "local_predictor": LocalCornerMoEPredictor(local_model) if local_model is not None else None,
+            "candidate_expand_ratios": list(TEACHER_MULTI_EXPAND_RATIOS),
+            "candidate_baseline_gate": float(TEACHER_CANDIDATE_BASELINE_GATE),
+            "candidate_min_score_gain": float(TEACHER_CANDIDATE_MIN_SCORE_GAIN),
         }
     except Exception:
         _MODEL_RUNTIME = None
@@ -392,6 +399,9 @@ def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> d
             roi_predictor=runtime["roi_predictor"],
             local_predictor=runtime["local_predictor"],
             page_id=Path(image_path).stem,
+            candidate_expand_ratios=runtime.get("candidate_expand_ratios"),
+            candidate_baseline_gate=float(runtime.get("candidate_baseline_gate", TEACHER_CANDIDATE_BASELINE_GATE)),
+            candidate_min_score_gain=float(runtime.get("candidate_min_score_gain", TEACHER_CANDIDATE_MIN_SCORE_GAIN)),
         )
     except Exception:
         return None
