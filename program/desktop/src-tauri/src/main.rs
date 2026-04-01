@@ -805,6 +805,20 @@ fn open_output_directory(output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn finalize_export_result(
+    mut result: ExportResult,
+    output_path: &Path,
+    open_directory_result: Result<()>,
+) -> ExportResult {
+    if let Err(err) = open_directory_result {
+        result.warnings.push(format!(
+            "导出已完成，但未能打开输出目录 {}: {err}",
+            output_directory(output_path).display()
+        ));
+    }
+    result
+}
+
 fn parse_engine_detect_output(output: &[u8]) -> Result<RawEngineResult> {
     let text = String::from_utf8_lossy(output);
     if let Ok(parsed) = serde_json::from_str::<RawEngineResult>(&text) {
@@ -1101,8 +1115,11 @@ fn run_engine_export(
 
     let result = serde_json::from_slice::<ExportResult>(&output.stdout)
         .context("failed to parse engine export output")?;
-    open_output_directory(&output_path)?;
-    Ok(result)
+    Ok(finalize_export_result(
+        result,
+        &output_path,
+        open_output_directory(&output_path),
+    ))
 }
 
 fn format_time(value: SystemTime) -> String {
@@ -1791,6 +1808,28 @@ mod tests {
     fn output_directory_uses_export_parent_folder() {
         let path = Path::new("/tmp/screen-pdf/out.pdf");
         assert_eq!(output_directory(path), PathBuf::from("/tmp/screen-pdf"));
+    }
+
+    #[test]
+    fn export_result_keeps_success_when_open_output_directory_fails() {
+        let result = finalize_export_result(
+            ExportResult {
+                output_path: "/tmp/demo/out.pdf".to_string(),
+                report_path: "/tmp/demo/out_export/export-report.json".to_string(),
+                page_count: 2,
+                effective_ocr_languages: Some("chi_sim+eng".to_string()),
+                warnings: vec![],
+                pages: vec![],
+            },
+            Path::new("/tmp/demo/out.pdf"),
+            Err(anyhow!("finder unavailable")),
+        );
+
+        assert_eq!(result.output_path, "/tmp/demo/out.pdf");
+        assert_eq!(result.page_count, 2);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("finder unavailable"));
+        assert!(result.warnings[0].contains("/tmp/demo"));
     }
 
     #[test]
