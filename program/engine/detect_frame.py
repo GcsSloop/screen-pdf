@@ -20,6 +20,10 @@ _MODEL_RUNTIME: dict[str, object] | None = None
 _DEEP_SCREEN_V1_RUNTIME: dict[str, object] | None = None
 _RUNTIME_RELEASE_MODEL_ID: str | None = None
 
+TEACHER_MULTI_EXPAND_RATIOS = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12]
+TEACHER_CANDIDATE_BASELINE_GATE = 0.45
+TEACHER_CANDIDATE_MIN_SCORE_GAIN = 0.03
+
 
 def to_plain_candidate(candidate: dict) -> dict:
     return {
@@ -271,6 +275,11 @@ def local_model_path() -> Path | None:
     return None
 
 
+def candidate_selector_path() -> Path | None:
+    path = _model_path("candidate_expand_selector.json")
+    return path if path.exists() else None
+
+
 def model_detection_enabled() -> bool:
     return os.environ.get("SCREEN_PDF_DISABLE_MODEL", "").strip().lower() not in {"1", "true", "yes"}
 
@@ -306,15 +315,25 @@ def _get_model_runtime() -> dict[str, object] | None:
     if not model_detection_enabled() or not _model_files_exist():
         return None
     try:
-        from two_stage_corner_pipeline import GlobalCornerPredictor, LocalCornerMoEPredictor, RoiCornerPredictor
+        from two_stage_corner_pipeline import (
+            GlobalCornerPredictor,
+            LinearCandidateExpandSelector,
+            LocalCornerMoEPredictor,
+            RoiCornerPredictor,
+        )
     except Exception:
         return None
     try:
         local_model = local_model_path()
+        selector_model = candidate_selector_path()
         _MODEL_RUNTIME = {
             "global_predictor": GlobalCornerPredictor(_model_path("global_corner_model.pt")),
             "roi_predictor": RoiCornerPredictor(_model_path("corner_heatmap_model.pt")),
             "local_predictor": LocalCornerMoEPredictor(local_model) if local_model is not None else None,
+            "candidate_selector": LinearCandidateExpandSelector.from_json(selector_model) if selector_model is not None else None,
+            "candidate_expand_ratios": list(TEACHER_MULTI_EXPAND_RATIOS),
+            "candidate_baseline_gate": float(TEACHER_CANDIDATE_BASELINE_GATE),
+            "candidate_min_score_gain": float(TEACHER_CANDIDATE_MIN_SCORE_GAIN),
         }
     except Exception:
         _MODEL_RUNTIME = None
@@ -384,6 +403,11 @@ def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> d
     if runtime is None:
         return None
 
+    if image is None:
+        image = cv2.imread(image_path)
+    if image is None:
+        return None
+
     try:
         result = predict_two_stage(
             image_path=Path(image_path),
@@ -391,19 +415,26 @@ def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> d
             global_predictor=runtime["global_predictor"],
             roi_predictor=runtime["roi_predictor"],
             local_predictor=runtime["local_predictor"],
+            candidate_selector=runtime.get("candidate_selector"),
             page_id=Path(image_path).stem,
+            candidate_expand_ratios=runtime.get("candidate_expand_ratios"),
+            candidate_baseline_gate=float(runtime.get("candidate_baseline_gate", TEACHER_CANDIDATE_BASELINE_GATE)),
+            candidate_min_score_gain=float(runtime.get("candidate_min_score_gain", TEACHER_CANDIDATE_MIN_SCORE_GAIN)),
         )
     except Exception:
         return None
 
+    metrics: dict[str, float] = {
+        "model": 1.0,
+        "stage_count": 3.0 if runtime["local_predictor"] is not None else 2.0,
+    }
+    confidence = 0.08
+
     return {
         "method": "teacher_current",
         "score": 0.96,
-        "confidence": 0.08,
-        "metrics": {
-            "model": 1.0,
-            "stage_count": 3.0 if runtime["local_predictor"] is not None else 2.0,
-        },
+        "confidence": confidence,
+        "metrics": metrics,
         "quad": result["final_quad"],
         "source": "runtime_teacher",
         "model_id": runtime_release_model_id(),

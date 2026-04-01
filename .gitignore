@@ -6,6 +6,7 @@ __pycache__/
 *.pyo
 *.DS_Store
 .secrets/
+.build/
 release-assets/
 program/desktop/src-tauri/target/
 program/desktop/src-tauri/gen/

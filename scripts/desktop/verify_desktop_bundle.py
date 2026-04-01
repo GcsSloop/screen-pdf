@@ -140,19 +140,39 @@ def verify_bundle(
         cmd = [
             str(bundled_python),
             str(engine_dir / "detect_frame.py"),
-            "detect-json",
+            "detect",
             "--image",
             str(smoke_image),
         ]
         output = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=engine_dir)
+        payload: dict[str, Any] | None = None
+        if output.stdout.strip():
+            try:
+                payload = json.loads(output.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"smoke detection returned invalid json: {exc}") from exc
         smoke_result = {
             "command": cmd,
             "returncode": output.returncode,
             "stdout_tail": output.stdout[-1000:],
             "stderr_tail": output.stderr[-1000:],
+            "payload": payload,
         }
         if output.returncode != 0:
             raise RuntimeError(f"smoke detection failed with exit code {output.returncode}")
+        if payload is None:
+            raise RuntimeError("smoke detection returned empty output")
+        candidates = payload.get("candidates") or []
+        runtime_candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("source", "")).startswith("runtime_")
+        ]
+        if not runtime_candidates:
+            raise RuntimeError("smoke detection did not include any runtime model candidates")
+        best = payload.get("best") or {}
+        if not str(best.get("source", "")).startswith("runtime_"):
+            raise RuntimeError("smoke detection best candidate did not come from runtime model")
 
     return {
         "bundle_path": str(bundle_path),

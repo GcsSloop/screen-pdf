@@ -1,33 +1,33 @@
 {
-  "public_name": "deep_screen_r1_2026_03_28",
-  "internal_name": "runtime_three_stage_r85_c21_r64probe_mt065_20260330",
+  "public_name": "deep_screen_r1_2026_04_01_r130",
+  "internal_name": "runtime_three_stage_r130_c22_r69probe_20260401",
   "status": "promoted",
   "teacher_models": [
-    "r85",
-    "c21",
-    "r64probe_mt065"
+    "r130",
+    "c22",
+    "r69probe"
   ],
-  "training_dataset": "weak3_plus_guard3 with balanced local trust retune",
+  "training_dataset": "guardrail broad project-balance ultralite with verified three-stage runtime chain",
   "validation_summary": {
-    "zeng": {
-      "point_error_mean": 0.0099,
-      "point_le_0_01_ratio": 0.8375
+    "jinyi": {
+      "point_error_mean": 0.0249,
+      "point_le_0_01_ratio": 0.4932
     },
-    "novastar": {
-      "point_error_mean": 0.0095,
-      "point_le_0_01_ratio": 0.7917
+    "fuzhou_root": {
+      "point_error_mean": 0.0094,
+      "point_le_0_01_ratio": 0.8296
     },
-    "openatom": {
-      "point_error_mean": 0.011,
-      "point_le_0_01_ratio": 0.8231
+    "lighting_root": {
+      "point_error_mean": 0.0074,
+      "point_le_0_01_ratio": 0.8778
     },
-    "road_led": {
-      "point_error_mean": 0.0123,
-      "point_le_0_01_ratio": 0.7174
+    "openatom_root": {
+      "point_error_mean": 0.0102,
+      "point_le_0_01_ratio": 0.8529
     },
-    "hangzhou_zhongkong": {
-      "point_error_mean": 0.0199,
-      "point_le_0_01_ratio": 0.6029
+    "hangzhou_root": {
+      "point_error_mean": 0.0146,
+      "point_le_0_01_ratio": 0.7113
     }
   },
   "runtime_files": [
@@ -36,8 +36,8 @@
     "models/runtime/local_corner_moe_coord_model.pt",
     "models/runtime/deep_screen_r1_2026_03_28.json"
   ],
-  "promoted_at": "2026-03-30T15:30:45Z",
-  "model_release_id": "model-20260330-153045-e60e199b",
-  "runtime_digest": "e60e199b81ba3075b4afd484a3551a3b872ee1cb",
-  "notes": "Pinned balanced runtime release for app version 0.2.1. This release keeps the existing flat runtime filenames for compatibility while promoting the r85 + c21 + r64probe(mt065) stack under one release name."
+  "promoted_at": "2026-04-01T06:06:36Z",
+  "model_release_id": "model-20260401-060636-035e5e08",
+  "runtime_digest": "035e5e08387744d55ed9b58f10bc4b6dc90173c3",
+  "notes": "Pinned runtime release for app version 0.2.7. This release keeps the existing flat runtime filenames for compatibility while promoting the verified r130 + c22 + r69probe stack under one release name."
 }

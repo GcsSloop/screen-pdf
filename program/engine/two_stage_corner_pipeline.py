@@ -4,7 +4,7 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import cv2
 import numpy as np
@@ -13,16 +13,115 @@ import torch
 try:
     from corner_train import CornerHeatmapNet, decode_model_output, remap_legacy_head_state_dict, select_torch_device
     from dataset_benchmark import normalized_point_error, quad_geometry_metrics, summarize_geometry_metric_rows
+    from global_corner_train import build_global_feature_tensor
     from perspective_detect import order_points
 except ModuleNotFoundError:
     from engine.corner_train import CornerHeatmapNet, decode_model_output, remap_legacy_head_state_dict, select_torch_device
     from engine.dataset_benchmark import normalized_point_error, quad_geometry_metrics, summarize_geometry_metric_rows
+    from engine.global_corner_train import build_global_feature_tensor
     from engine.perspective_detect import order_points
 
 
 QuadPredictor = Callable[[Path], np.ndarray]
 RoiPredictor = Callable[[dict[str, Any]], np.ndarray]
 LocalQuadPredictor = Callable[[Path, np.ndarray], np.ndarray]
+
+CANDIDATE_SELECTOR_FEATURE_NAMES = [
+    "expand_ratio",
+    "candidate_score",
+    "mean_trust",
+    "min_trust",
+    "mean_displacement_norm",
+    "max_displacement_norm",
+    "roi_width_frac",
+    "roi_height_frac",
+    "roi_area_frac",
+    "coarse_drift",
+    "is_baseline",
+    "candidate_score_delta_vs_baseline",
+    "mean_trust_delta_vs_baseline",
+    "min_trust_delta_vs_baseline",
+    "mean_displacement_delta_vs_baseline",
+    "max_displacement_delta_vs_baseline",
+    "roi_area_delta_vs_baseline",
+    "coarse_drift_delta_vs_baseline",
+]
+
+
+class LinearCandidateExpandSelector:
+    def __init__(
+        self,
+        weights: Sequence[float],
+        bias: float = 0.0,
+        *,
+        feature_mean: Sequence[float] | None = None,
+        feature_std: Sequence[float] | None = None,
+        feature_names: Sequence[str] | None = None,
+        switch_margin: float = 0.0,
+    ) -> None:
+        self.weights = np.array(list(weights), dtype=np.float32)
+        self.bias = float(bias)
+        self.feature_mean = (
+            np.array(list(feature_mean), dtype=np.float32)
+            if feature_mean is not None
+            else np.zeros_like(self.weights, dtype=np.float32)
+        )
+        self.feature_std = (
+            np.array(list(feature_std), dtype=np.float32)
+            if feature_std is not None
+            else np.ones_like(self.weights, dtype=np.float32)
+        )
+        self.feature_std = np.where(np.abs(self.feature_std) < 1e-6, 1.0, self.feature_std)
+        self.feature_names = list(feature_names or [])
+        self.switch_margin = float(switch_margin)
+        if self.feature_mean.shape != self.weights.shape or self.feature_std.shape != self.weights.shape:
+            raise ValueError("selector normalization shape mismatch")
+
+    @classmethod
+    def from_json(cls, path: Path) -> "LinearCandidateExpandSelector":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return cls(
+            payload["weights"],
+            bias=float(payload.get("bias", 0.0)),
+            feature_mean=payload.get("feature_mean"),
+            feature_std=payload.get("feature_std"),
+            feature_names=payload.get("feature_names"),
+            switch_margin=float(payload.get("switch_margin", 0.0) or 0.0),
+        )
+
+    def score_features(self, features: Sequence[float]) -> float:
+        vector = np.array(list(features), dtype=np.float32)
+        if vector.shape != self.weights.shape:
+            raise ValueError(f"feature shape mismatch: expected {self.weights.shape}, got {vector.shape}")
+        normalized = (vector - self.feature_mean) / self.feature_std
+        return float(np.dot(normalized, self.weights) + self.bias)
+
+    def select_candidate(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        baseline_expand_ratio: float,
+    ) -> dict[str, Any] | None:
+        scored: list[tuple[float, dict[str, Any]]] = []
+        baseline_item: dict[str, Any] | None = None
+        baseline_score: float | None = None
+        for item in candidates:
+            features = item.get("selector_features")
+            if not isinstance(features, list) or not features:
+                continue
+            score = self.score_features(features)
+            scored.append((score, item))
+            if abs(float(item.get("expand_ratio", -1.0) or -1.0) - float(baseline_expand_ratio)) <= 1e-9:
+                baseline_item = item
+                baseline_score = score
+        if not scored:
+            return None
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        best_score, best_item = scored[0]
+        if baseline_item is not None and best_item is not baseline_item and baseline_score is not None:
+            if float(best_score) < float(baseline_score) + float(self.switch_margin):
+                return baseline_item
+        return best_item
 
 
 def _load_image(image_path: Path) -> np.ndarray:
@@ -123,6 +222,158 @@ def build_refine_request(
     }
 
 
+def _compute_local_candidate_score(details: dict[str, Any] | None) -> float | None:
+    if not details:
+        return None
+    corner_details = details.get("corner_details")
+    if not isinstance(corner_details, list) or not corner_details:
+        return None
+    trust_values: list[float] = []
+    displacement_norms: list[float] = []
+    for item in corner_details:
+        if not isinstance(item, dict):
+            continue
+        trust = float(item.get("trust", 0.0) or 0.0)
+        displacement = float(item.get("displacement", 0.0) or 0.0)
+        patch_size = max(float(item.get("patch_size", 1.0) or 1.0), 1.0)
+        trust_values.append(trust)
+        displacement_norms.append(displacement / patch_size)
+    if not trust_values or not displacement_norms:
+        return None
+    return float(np.mean(trust_values) - 0.5 * np.mean(displacement_norms))
+
+
+def _build_candidate_selector_features(candidate: dict[str, Any], coarse_quad: np.ndarray, image_shape: Sequence[int]) -> list[float]:
+    height, width = image_shape[:2]
+    width = max(float(width), 1.0)
+    height = max(float(height), 1.0)
+    roi = candidate.get("roi") or {}
+    roi_width = max(float(roi.get("width", 0.0) or 0.0), 1.0)
+    roi_height = max(float(roi.get("height", 0.0) or 0.0), 1.0)
+    corner_details = (candidate.get("local_details") or {}).get("corner_details") or []
+    trust_values: list[float] = []
+    displacement_norms: list[float] = []
+    for item in corner_details:
+        if not isinstance(item, dict):
+            continue
+        trust_values.append(float(item.get("trust", 0.0) or 0.0))
+        patch_size = max(float(item.get("patch_size", 1.0) or 1.0), 1.0)
+        displacement_norms.append(float(item.get("displacement", 0.0) or 0.0) / patch_size)
+    final_source = candidate.get("final_quad")
+    if final_source is None:
+        final_source = candidate.get("roi_quad")
+    if final_source is None:
+        final_source = coarse_quad
+    final_quad = np.array(final_source, dtype=np.float32)
+    final_quad = order_points(final_quad)
+    coarse_quad = order_points(np.array(coarse_quad, dtype=np.float32))
+    drift = float(normalized_point_error(final_quad / np.array([width, height], dtype=np.float32), coarse_quad / np.array([width, height], dtype=np.float32)))
+    return [
+        float(candidate.get("expand_ratio", 0.0) or 0.0),
+        float(candidate.get("candidate_score", 0.0) or 0.0),
+        float(np.mean(trust_values)) if trust_values else 0.0,
+        float(np.min(trust_values)) if trust_values else 0.0,
+        float(np.mean(displacement_norms)) if displacement_norms else 0.0,
+        float(np.max(displacement_norms)) if displacement_norms else 0.0,
+        roi_width / width,
+        roi_height / height,
+        (roi_width * roi_height) / max(width * height, 1.0),
+        drift,
+    ]
+
+
+def _attach_candidate_selector_features(
+    candidates: list[dict[str, Any]],
+    coarse_quad: np.ndarray,
+    image_shape: Sequence[int],
+    *,
+    baseline_expand_ratio: float,
+) -> None:
+    raw_features = [
+        _build_candidate_selector_features(item, coarse_quad, image_shape)
+        for item in candidates
+    ]
+    baseline_index = next(
+        (
+            index
+            for index, item in enumerate(candidates)
+            if abs(float(item.get("expand_ratio", -1.0) or -1.0) - float(baseline_expand_ratio)) <= 1e-9
+        ),
+        0,
+    )
+    baseline_features = raw_features[baseline_index]
+    for index, item in enumerate(candidates):
+        raw = raw_features[index]
+        item["selector_features"] = [
+            *raw,
+            1.0 if index == baseline_index else 0.0,
+            raw[1] - baseline_features[1],
+            raw[2] - baseline_features[2],
+            raw[3] - baseline_features[3],
+            raw[4] - baseline_features[4],
+            raw[5] - baseline_features[5],
+            raw[8] - baseline_features[8],
+            raw[9] - baseline_features[9],
+        ]
+
+
+def _should_use_candidate_expand_selection(
+    baseline_score: float | None,
+    best_score: float | None,
+    *,
+    baseline_gate: float,
+    min_score_gain: float,
+) -> bool:
+    if baseline_score is None or best_score is None:
+        return False
+    return float(baseline_score) < float(baseline_gate) and float(best_score) > float(baseline_score) + float(min_score_gain)
+
+
+def _run_two_stage_candidate(
+    *,
+    image_path: Path,
+    page_id: str,
+    image: np.ndarray,
+    coarse_quad: np.ndarray,
+    roi_predictor: RoiPredictor,
+    local_predictor: LocalQuadPredictor | None,
+    expand_ratio: float,
+) -> dict[str, Any]:
+    request = build_refine_request(
+        image_path=image_path,
+        coarse_quad=coarse_quad,
+        page_id=page_id,
+        expand_ratio=expand_ratio,
+        image=image,
+    )
+    pred_norm = np.array(roi_predictor(request), dtype=np.float32)
+    roi_quad = apply_roi_prediction(pred_norm, request["roi"], image.shape)
+    final_quad = roi_quad
+    local_details: dict[str, Any] | None = None
+    if local_predictor is not None:
+        predict_with_details = getattr(local_predictor, "predict_with_details", None)
+        if callable(predict_with_details):
+            try:
+                local_details = predict_with_details(image_path=image_path, predicted_quad=roi_quad, image=image)
+            except TypeError:
+                local_details = predict_with_details(image_path, roi_quad, image=image)
+            final_quad = order_points(np.array(local_details.get("quad", roi_quad), dtype=np.float32))
+        else:
+            try:
+                refined = local_predictor(image_path, roi_quad, image=image)
+            except TypeError:
+                refined = local_predictor(image_path, roi_quad)
+            final_quad = order_points(np.array(refined, dtype=np.float32))
+    return {
+        "roi_quad": roi_quad,
+        "final_quad": final_quad,
+        "roi": request["roi"],
+        "expand_ratio": float(expand_ratio),
+        "local_details": local_details,
+        "candidate_score": _compute_local_candidate_score(local_details),
+    }
+
+
 def predict_two_stage(
     image_path: Path,
     global_predictor: QuadPredictor,
@@ -130,6 +381,10 @@ def predict_two_stage(
     local_predictor: LocalQuadPredictor | None = None,
     page_id: str | None = None,
     expand_ratio: float = 0.08,
+    candidate_expand_ratios: Sequence[float] | None = None,
+    candidate_baseline_gate: float = 0.45,
+    candidate_min_score_gain: float = 0.03,
+    candidate_selector: Any | None = None,
     image: np.ndarray | None = None,
 ) -> dict[str, Any]:
     resolved_page_id = page_id or image_path.stem
@@ -138,29 +393,78 @@ def predict_two_stage(
     predict_image = getattr(global_predictor, "predict_image", None)
     coarse_pred = predict_image(image) if callable(predict_image) else global_predictor(image_path)
     coarse_quad = order_points(np.array(coarse_pred, dtype=np.float32))
-    request = build_refine_request(
+    expand_candidates: list[float] = [float(expand_ratio)]
+    if candidate_expand_ratios:
+        seen: set[float] = set()
+        expand_candidates = []
+        for value in [*candidate_expand_ratios, float(expand_ratio)]:
+            ratio = float(value)
+            if ratio <= 0.0 or ratio in seen:
+                continue
+            seen.add(ratio)
+            expand_candidates.append(ratio)
+        expand_candidates.sort()
+    selected = _run_two_stage_candidate(
         image_path=image_path,
-        coarse_quad=coarse_quad,
         page_id=resolved_page_id,
-        expand_ratio=expand_ratio,
         image=image,
+        coarse_quad=coarse_quad,
+        roi_predictor=roi_predictor,
+        local_predictor=local_predictor,
+        expand_ratio=float(expand_ratio),
     )
-    pred_norm = np.array(roi_predictor(request), dtype=np.float32)
-    roi_quad = apply_roi_prediction(pred_norm, request["roi"], image.shape)
-    final_quad = roi_quad
-    if local_predictor is not None:
-        try:
-            refined = local_predictor(image_path, roi_quad, image=image)
-        except TypeError:
-            refined = local_predictor(image_path, roi_quad)
-        final_quad = order_points(np.array(refined, dtype=np.float32))
+    if len(expand_candidates) > 1 and local_predictor is not None and callable(getattr(local_predictor, "predict_with_details", None)):
+        candidates = [
+            _run_two_stage_candidate(
+                image_path=image_path,
+                page_id=resolved_page_id,
+                image=image,
+                coarse_quad=coarse_quad,
+                roi_predictor=roi_predictor,
+                local_predictor=local_predictor,
+                expand_ratio=ratio,
+            )
+            for ratio in expand_candidates
+        ]
+        _attach_candidate_selector_features(
+            candidates,
+            coarse_quad,
+            image.shape,
+            baseline_expand_ratio=float(expand_ratio),
+        )
+        baseline = next(
+            (item for item in candidates if abs(float(item["expand_ratio"]) - float(expand_ratio)) <= 1e-9),
+            candidates[0],
+        )
+        if candidate_selector is not None and callable(getattr(candidate_selector, "select_candidate", None)):
+            chosen = candidate_selector.select_candidate(candidates, baseline_expand_ratio=float(expand_ratio))
+            if isinstance(chosen, dict):
+                selected = chosen
+            else:
+                selected = baseline
+        else:
+            best = max(
+                candidates,
+                key=lambda item: float(item["candidate_score"]) if item["candidate_score"] is not None else float("-inf"),
+            )
+            if _should_use_candidate_expand_selection(
+                baseline["candidate_score"],
+                best["candidate_score"],
+                baseline_gate=candidate_baseline_gate,
+                min_score_gain=candidate_min_score_gain,
+            ):
+                selected = best
+            else:
+                selected = baseline
     return {
         "page_id": resolved_page_id,
         "image_path": str(image_path),
         "coarse_quad": coarse_quad.tolist(),
-        "roi_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in roi_quad],
-        "final_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in final_quad],
-        "roi": request["roi"],
+        "roi_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in selected["roi_quad"]],
+        "final_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in selected["final_quad"]],
+        "roi": selected["roi"],
+        "selected_expand_ratio": round(float(selected["expand_ratio"]), 4),
+        "candidate_count": len(expand_candidates),
     }
 
 
@@ -168,25 +472,27 @@ class GlobalCornerPredictor:
     def __init__(self, model_path: Path) -> None:
         self.device = select_torch_device()
         checkpoint = torch.load(model_path, map_location=self.device)
+        self.input_channels = int(checkpoint.get("input_channels", 3) or 3)
+        self.feature_mode = str(checkpoint.get("feature_mode", "rgb"))
+        self.input_size = int(checkpoint["input_size"])
+        self.decode_mode = str(checkpoint.get("decode_mode", "argmax"))
+        self.head_mode = str(checkpoint.get("head_mode", "heatmap"))
         self.model = CornerHeatmapNet(
-            in_channels=3,
+            in_channels=self.input_channels,
             channels=int(checkpoint["channels"]),
             output_channels=4,
-            head_mode=str(checkpoint.get("head_mode", "heatmap")),
+            head_mode=self.head_mode,
         )
         self.model.load_state_dict(remap_legacy_head_state_dict(checkpoint["state_dict"]))
         self.model.to(self.device)
         self.model.eval()
-        self.input_size = int(checkpoint["input_size"])
-        self.decode_mode = str(checkpoint.get("decode_mode", "argmax"))
-        self.head_mode = str(checkpoint.get("head_mode", "heatmap"))
 
     def predict_image(self, image: np.ndarray) -> np.ndarray:
         height, width = image.shape[:2]
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = cv2.resize(image, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
-        image_f = image.astype(np.float32) / 255.0
-        tensor = torch.from_numpy(np.transpose(image_f, (2, 0, 1))[None, ...]).to(device=self.device, dtype=torch.float32)
+        features = build_global_feature_tensor(image, feature_mode=self.feature_mode)
+        tensor = torch.from_numpy(features[None, ...]).to(device=self.device, dtype=torch.float32)
         with torch.no_grad():
             output = self.model(tensor)
             pred_norm = decode_model_output(output, decode_mode=self.decode_mode, head_mode=self.head_mode).cpu().numpy()[0]
