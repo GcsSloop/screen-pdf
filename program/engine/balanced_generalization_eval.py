@@ -17,13 +17,24 @@ from dataset_benchmark import (
 )
 from detect_frame import run_model_detection
 from project_corner_benchmark import benchmark_project
-from two_stage_corner_pipeline import GlobalCornerPredictor, LocalCornerMoEPredictor, RoiCornerPredictor, predict_two_stage
+from two_stage_corner_pipeline import (
+    GlobalCornerPredictor,
+    LinearCandidateExpandSelector,
+    LocalCornerMoEPredictor,
+    RoiCornerPredictor,
+    predict_two_stage,
+)
 
 
 def build_runtime_runner(
     global_model: Path | None,
     roi_model: Path | None,
     local_model: Path | None,
+    *,
+    candidate_selector_path: Path | None = None,
+    candidate_expand_ratios: list[float] | None = None,
+    candidate_baseline_gate: float = 0.45,
+    candidate_min_score_gain: float = 0.03,
 ):
     if global_model is None or roi_model is None:
         return run_model_detection
@@ -31,6 +42,11 @@ def build_runtime_runner(
     global_predictor = GlobalCornerPredictor(global_model)
     roi_predictor = RoiCornerPredictor(roi_model)
     local_predictor = LocalCornerMoEPredictor(local_model) if local_model is not None else None
+    candidate_selector = (
+        LinearCandidateExpandSelector.from_json(candidate_selector_path)
+        if candidate_selector_path is not None
+        else None
+    )
 
     def _runner(image_path: str, image: Any | None = None) -> dict[str, Any] | None:
         result = predict_two_stage(
@@ -38,7 +54,11 @@ def build_runtime_runner(
             global_predictor=global_predictor,
             roi_predictor=roi_predictor,
             local_predictor=local_predictor,
+            candidate_selector=candidate_selector,
             page_id=Path(image_path).stem,
+            candidate_expand_ratios=candidate_expand_ratios,
+            candidate_baseline_gate=float(candidate_baseline_gate),
+            candidate_min_score_gain=float(candidate_min_score_gain),
             image=image,
         )
         return {
@@ -159,15 +179,28 @@ def main() -> int:
     parser.add_argument("--global-model")
     parser.add_argument("--roi-model")
     parser.add_argument("--local-model")
+    parser.add_argument("--candidate-selector")
+    parser.add_argument("--candidate-expand-ratios", default="")
+    parser.add_argument("--candidate-baseline-gate", type=float, default=0.45)
+    parser.add_argument("--candidate-min-score-gain", type=float, default=0.03)
     parser.add_argument("--output")
     args = parser.parse_args()
 
     dataset_root = Path(args.dataset_root)
     pages = load_manual_pages(dataset_root)
+    candidate_expand_ratios = [
+        float(part.strip())
+        for part in str(args.candidate_expand_ratios).split(",")
+        if part.strip()
+    ] or None
     runtime_runner = build_runtime_runner(
         Path(args.global_model) if args.global_model else None,
         Path(args.roi_model) if args.roi_model else None,
         Path(args.local_model) if args.local_model else None,
+        candidate_selector_path=Path(args.candidate_selector) if args.candidate_selector else None,
+        candidate_expand_ratios=candidate_expand_ratios,
+        candidate_baseline_gate=float(args.candidate_baseline_gate),
+        candidate_min_score_gain=float(args.candidate_min_score_gain),
     )
     split = build_project_aware_split(
         pages,

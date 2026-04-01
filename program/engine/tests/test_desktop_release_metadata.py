@@ -24,7 +24,7 @@ from scripts.desktop.release_metadata import (  # noqa: E402
 class ReleaseMetadataTests(unittest.TestCase):
     def test_resolve_desktop_version_reads_matching_desktop_versions(self) -> None:
         version = resolve_desktop_version(REPO_ROOT)
-        self.assertEqual(version, "0.2.1")
+        self.assertEqual(version, "0.2.7")
 
     def test_verify_desktop_versions_match_rejects_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

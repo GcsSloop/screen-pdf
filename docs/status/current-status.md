@@ -32,12 +32,12 @@
 - coarse/global 主干：`r3`
 - local-corner 候选：`v28`
 
-`2026-03-28` 当前固定 runtime 发布版本：
+`2026-04-01` 当前固定 runtime 发布版本：
 
-- `deep_screen_r1_2026_03_28`
-- `model_release_id = model-20260330-153045-e60e199b`
-- app 版本：`0.2.1`
-- runtime 组合：`r85 + c21 + r64probe(mt065)`
+- `deep_screen_r1_2026_04_01_r130`
+- `model_release_id = model-20260401-060636-035e5e08`
+- app 版本：`0.2.7`
+- runtime 组合：`r130 + c22 + r69probe`
 
 当前发布流程约定：
 
@@ -200,6 +200,14 @@
   - 真正重做 strict-point 数据集与 split，而不是继续调采样权重
   - 更可靠的 validation 口径
   - 或单独把 `round_025 epoch_002` 作为当前 strict-point 最佳候选冻结
+
+`2026-04-01` failure-layer 诊断后的当前共识补充：
+
+- 当前 `r96 + c22 + r69probe` 链路在金溢、杭州、OpenAtom 上的主要瓶颈已不是继续扫 selector 参数。
+- OpenAtom 仍有明显 `runtime_candidate_recoverable` 空间，说明候选常常已经出现过，但这条线的 oracle 上限也已接近天花板。
+- 杭州特别是 `2026-03-05 中控交安` 以 `hard_both_fail` 为主，说明 coarse 对这类几何与边界分布没有学会，不能再靠 selector 或场景特例推进。
+- 因此下一主线改为：把 `failure-layer` 诊断写回 coarse 训练 split，并对 `runtime_candidate_recoverable / opencv_recoverable / hard_both_fail` 做显式重采样与 teacher-source 控制。
+- 当前阶段不再扩展新的场景特例路由，也不恢复记忆依赖。
 
 `round_042` 到 `round_050` 的 `split_v2` 结果：
 

@@ -12,11 +12,11 @@
 
 ## 当前固定发布
 
-- `deep_screen_r1_2026_03_28`
-- app 版本：`0.2.0`
-- coarse：`r85`
-- roi：`c21`
-- local：`r64probe(mt065)`
+- `deep_screen_r1_2026_04_01_r130`
+- app 版本：`0.2.7`
+- coarse：`r130`
+- roi：`c22`
+- local：`r69probe`
 
 ## 统一蒸馏模型
 

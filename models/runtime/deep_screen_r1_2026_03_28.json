@@ -1,60 +1,76 @@
 {
-  "public_name": "deep_screen_r1_2026_03_28",
+  "public_name": "deep_screen_r1_2026_04_01_r130",
   "status": "promoted",
-  "released_at": "2026-03-30T15:30:45Z",
-  "app_version": "0.2.1",
+  "released_at": "2026-04-01T06:06:36Z",
+  "app_version": "0.2.7",
   "runtime_chain": [
     "global coarse",
     "single ROI refine",
-    "local corner refine"
+    "local corner refine",
+    "runtime multi-expand candidate selection"
   ],
   "models": {
     "global": {
       "runtime_file": "models/runtime/global_corner_model.pt",
-      "runtime_sha1": "3937f07e3e732caaa2bc2e806f4bfee1c4188c5d",
-      "source_checkpoint": "training/runs/global_corner_r85_202603_infocomm_metaverse_focusmerge24x_from_r84_v1/output/checkpoints/epoch_001.pt",
-      "model_id": "r85"
+      "runtime_sha1": "f22255667183d13a43eabfed9dff0b9ddaa739cf",
+      "source_checkpoint": "training/runs/global_corner_r130_202604_guardrail_broad_projectbalance_ultralite_from_r127_v1/output/global_corner_model.pt",
+      "model_id": "r130"
     },
     "roi": {
       "runtime_file": "models/runtime/corner_heatmap_model.pt",
-      "runtime_sha1": "a64d4ad211d3b08bd5b83c9372be15313330033d",
-      "source_checkpoint": "training/runs/roi_corner_c21_202603_r85_weak3_guardmix_from_runtime_v1/output/corner_heatmap_model.pt",
-      "model_id": "c21"
+      "runtime_sha1": "b07155ce6f9c08a9a0bc0d17c46e68f23681ae1a",
+      "source_checkpoint": "training/runs/roi_corner_c22_202603_jinyi_manualfocus12_from_c21_v1/output/corner_heatmap_model.pt",
+      "model_id": "c22"
     },
     "local": {
       "runtime_file": "models/runtime/local_corner_moe_coord_model.pt",
-      "runtime_sha1": "200f39f3b52e1c11a8a72bbb764711f3b72b9ebc",
-      "source_checkpoint": "training/runs/local_corner_r64probe_blend_sweep_20260330/mt065.pt",
-      "model_id": "r64probe_mt065"
+      "runtime_sha1": "312cb0da1ff799c1bc7367d3dbbfc0dffb5ce483",
+      "source_checkpoint": "training/runs/local_corner_r69probe_202603_r92c22_jinyi_fast12k_from_runtime_v1/output/local_corner_moe_coord_model.pt",
+      "model_id": "r69probe"
+    }
+  },
+  "artifacts": {
+    "global": {
+      "path": "models/runtime/global_corner_model.pt",
+      "sha1": "f22255667183d13a43eabfed9dff0b9ddaa739cf"
+    },
+    "roi": {
+      "path": "models/runtime/corner_heatmap_model.pt",
+      "sha1": "b07155ce6f9c08a9a0bc0d17c46e68f23681ae1a"
+    },
+    "local": {
+      "path": "models/runtime/local_corner_moe_coord_model.pt",
+      "sha1": "312cb0da1ff799c1bc7367d3dbbfc0dffb5ce483"
     }
   },
   "validation_summary": {
-    "zeng": {
-      "point_error_mean": 0.0099,
-      "point_le_0_01_ratio": 0.8375
+    "jinyi": {
+      "point_error_mean": 0.0249,
+      "point_le_0_01_ratio": 0.4932
     },
-    "novastar": {
-      "point_error_mean": 0.0095,
-      "point_le_0_01_ratio": 0.7917
+    "fuzhou_root": {
+      "point_error_mean": 0.0094,
+      "point_le_0_01_ratio": 0.8296
     },
-    "openatom": {
-      "point_error_mean": 0.011,
-      "point_le_0_01_ratio": 0.8231
+    "lighting_root": {
+      "point_error_mean": 0.0074,
+      "point_le_0_01_ratio": 0.8778
     },
-    "road_led": {
-      "point_error_mean": 0.0123,
-      "point_le_0_01_ratio": 0.7174
+    "openatom_root": {
+      "point_error_mean": 0.0102,
+      "point_le_0_01_ratio": 0.8529
     },
-    "hangzhou_zhongkong": {
-      "point_error_mean": 0.0199,
-      "point_le_0_01_ratio": 0.6029
+    "hangzhou_root": {
+      "point_error_mean": 0.0146,
+      "point_le_0_01_ratio": 0.7113
     }
   },
   "references": {
-    "training_report": "training/reports/2026-03-30-r85-c21-r64probe-novastar-openatom-led-plus-guard3-compare.json",
-    "blend_report": "training/reports/2026-03-30-r85-c21-r64probe-mt065-compare.json"
+    "core4_runtime_eval": "training/runs/global_corner_r130_202604_guardrail_broad_projectbalance_ultralite_from_r127_v1/runtime_eval_core4.json",
+    "lighting_runtime_eval": "training/runs/global_corner_r130_202604_guardrail_broad_projectbalance_ultralite_from_r127_v1/runtime_eval_lighting.json",
+    "full_project_validation": "training/runs/global_corner_r130_202604_guardrail_broad_projectbalance_ultralite_from_r127_v1/full_project_validation_20260401_fresh.json"
   },
-  "notes": "Balanced packaged runtime for app version 0.2.1: r85 global + c21 ROI + r64probe local with max_trust=0.65 blend. This variant keeps the newly added weak targets above their requested floor while pulling Hangzhou Zhongkong back above 0.60 without retraining the runtime files again.",
-  "model_release_id": "model-20260330-153045-e60e199b",
-  "runtime_digest": "e60e199b81ba3075b4afd484a3551a3b872ee1cb"
+  "notes": "Pinned runtime release for app version 0.2.7. This release promotes the verified r130 + c22 + r69probe stack and keeps the flat runtime filenames for desktop compatibility.",
+  "model_release_id": "model-20260401-060636-035e5e08",
+  "runtime_digest": "035e5e08387744d55ed9b58f10bc4b6dc90173c3"
 }

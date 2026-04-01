@@ -14,14 +14,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 
+from corner_train import CornerHeatmapNet
 from global_corner_train import (
     GlobalCornerDataset,
+    build_adaptive_teacher_target,
+    build_multi_teacher_target,
+    apply_global_perspective_augmentation,
+    bootstrap_inward_geometry_scale,
+    build_global_feature_tensor,
     build_effective_split_dir,
     compute_edge_supervision_loss,
     compute_corner_weighted_coord_loss,
     compute_global_geometry_loss,
     denormalize_corners,
     export_global_corner_split,
+    initialize_global_model_from_checkpoint,
+    is_bootstrap_inward_hard_page,
+    is_geometry_priority_low_contrast_scene,
     is_legacy_dark_muted_scene,
     reframe_image_and_corners,
     train_global_corner_model,
@@ -55,6 +64,24 @@ class GlobalCornerTrainTests(unittest.TestCase):
             atol=1e-4,
         )
 
+    def test_apply_global_perspective_augmentation_warps_quad_geometry(self) -> None:
+        image = np.full((100, 200, 3), 180, dtype=np.uint8)
+        corners = np.array(
+            [[0.10, 0.20], [0.90, 0.20], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        jitter = np.array(
+            [[0.0, -8.0], [0.0, 4.0], [0.0, 0.0], [0.0, 10.0]],
+            dtype=np.float32,
+        )
+
+        warped_image, warped_corners = apply_global_perspective_augmentation(image, corners, jitter=jitter)
+
+        self.assertEqual(warped_image.shape, image.shape)
+        self.assertEqual(warped_corners.shape, corners.shape)
+        self.assertGreater(float(warped_corners[1, 1]), float(warped_corners[0, 1]))
+        self.assertGreater(float(warped_corners[3, 1]), float(warped_corners[0, 1]))
+
     def test_denormalize_corners_restores_image_coordinates(self) -> None:
         corners = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], dtype=np.float32)
 
@@ -82,6 +109,222 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertEqual(tuple(item["image"].shape), (3, 128, 128))
         self.assertEqual(tuple(item["heatmaps"].shape), (4, 32, 32))
         self.assertEqual(tuple(item["corners"].shape), (4, 2))
+
+    def test_global_corner_dataset_supports_rgb_gray_border_feature_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((120, 200, 3), dtype=np.uint8)
+            image[:, :] = (30, 90, 150)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                feature_mode="rgb_gray_border",
+            )
+            item = dataset[0]
+
+        self.assertEqual(tuple(item["image"].shape), (5, 128, 128))
+        self.assertGreater(float(item["image"][3].mean()), 0.0)
+        self.assertGreater(float(item["image"][4][:8, :].mean()), 0.0)
+        self.assertAlmostEqual(float(item["image"][4][64, 64]), 0.0, places=5)
+
+    def test_build_sample_weights_supports_failure_layer_category_boosts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = root / "train.jsonl"
+            rows = [
+                {"page_id": "base", "image_path": "/tmp/base.jpg", "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                {
+                    "page_id": "runtime",
+                    "image_path": "/tmp/runtime.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "runtime_candidate_recoverable",
+                },
+                {
+                    "page_id": "opencv",
+                    "image_path": "/tmp/opencv.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "opencv_recoverable",
+                },
+                {
+                    "page_id": "hard",
+                    "image_path": "/tmp/hard.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "hard_both_fail",
+                },
+            ]
+            manifest.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, augment=False)
+            weights = dataset.build_sample_weights(
+                failure_layer_runtime_boost=1.2,
+                failure_layer_opencv_boost=1.5,
+                failure_layer_hard_boost=1.8,
+            )
+
+        self.assertGreater(float(weights[1]), float(weights[0]))
+        self.assertGreater(float(weights[2]), float(weights[1]))
+        self.assertGreater(float(weights[3]), float(weights[2]))
+
+    def test_build_sample_weights_supports_failure_layer_gain_power(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = root / "train.jsonl"
+            rows = [
+                {
+                    "page_id": "low-gain",
+                    "image_path": "/tmp/low.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "opencv_recoverable",
+                    "failure_layer_union_gain": 0.02,
+                },
+                {
+                    "page_id": "high-gain",
+                    "image_path": "/tmp/high.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "opencv_recoverable",
+                    "failure_layer_union_gain": 0.20,
+                },
+            ]
+            manifest.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, augment=False)
+            weights = dataset.build_sample_weights(
+                failure_layer_opencv_boost=1.0,
+                failure_layer_gain_power=1.0,
+            )
+
+        self.assertGreater(float(weights[1]), float(weights[0]))
+
+    def test_build_sample_weights_can_project_balance_failure_layer_gains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = root / "train.jsonl"
+            rows = [
+                {
+                    "page_id": "hz-1",
+                    "project_name": "杭州A",
+                    "image_path": "/tmp/hz1.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "opencv_recoverable",
+                    "failure_layer_union_gain": 0.20,
+                },
+                {
+                    "page_id": "hz-2",
+                    "project_name": "杭州A",
+                    "image_path": "/tmp/hz2.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "opencv_recoverable",
+                    "failure_layer_union_gain": 0.20,
+                },
+                {
+                    "page_id": "jy-1",
+                    "project_name": "金溢B",
+                    "image_path": "/tmp/jy1.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    "failure_layer_category": "opencv_recoverable",
+                    "failure_layer_union_gain": 0.02,
+                },
+            ]
+            manifest.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, augment=False)
+            unbalanced = dataset.build_sample_weights(
+                failure_layer_gain_power=1.0,
+            )
+            balanced = dataset.build_sample_weights(
+                failure_layer_gain_power=1.0,
+                failure_layer_project_balance=True,
+            )
+
+        self.assertGreater(float(unbalanced[0]), float(unbalanced[2]))
+        self.assertLess(float(balanced[0] - balanced[2]), float(unbalanced[0] - unbalanced[2]))
+
+    def test_build_sample_weights_can_balance_projects_by_frequency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = root / "train.jsonl"
+            rows = [
+                {
+                    "page_id": "major-1",
+                    "project_name": "主项目",
+                    "image_path": "/tmp/major1.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                },
+                {
+                    "page_id": "major-2",
+                    "project_name": "主项目",
+                    "image_path": "/tmp/major2.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                },
+                {
+                    "page_id": "major-3",
+                    "project_name": "主项目",
+                    "image_path": "/tmp/major3.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                },
+                {
+                    "page_id": "minor-1",
+                    "project_name": "次项目",
+                    "image_path": "/tmp/minor1.jpg",
+                    "manual_quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                },
+            ]
+            manifest.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, augment=False)
+            unbalanced = dataset.build_sample_weights()
+            balanced = dataset.build_sample_weights(project_balance_power=1.0)
+
+        self.assertAlmostEqual(float(unbalanced[0]), float(unbalanced[3]), places=6)
+        self.assertGreater(float(balanced[3]), float(balanced[0]))
+
+    def test_build_global_feature_tensor_adds_border_gray_channels(self) -> None:
+        image = np.full((10, 12, 3), 128, dtype=np.uint8)
+
+        feature = build_global_feature_tensor(image, feature_mode="rgb_gray_border")
+
+        self.assertEqual(feature.shape, (5, 10, 12))
+        self.assertTrue(np.allclose(feature[3], 128.0 / 255.0, atol=1e-6))
+        self.assertGreater(float(feature[4, 0, 0]), 0.0)
+        self.assertGreater(float(feature[4, -1, -1]), 0.0)
+        self.assertAlmostEqual(float(feature[4, 5, 6]), 0.0, places=6)
+
+    def test_initialize_global_model_from_checkpoint_inflates_stem_input_channels(self) -> None:
+        source_model = CornerHeatmapNet(in_channels=3, channels=16, output_channels=4)
+        target_model = CornerHeatmapNet(in_channels=5, channels=16, output_channels=4)
+        checkpoint = {"state_dict": source_model.state_dict()}
+
+        initialize_global_model_from_checkpoint(target_model, checkpoint)
+
+        target_weight = target_model.state_dict()["stem.block.0.weight"]
+        source_weight = checkpoint["state_dict"]["stem.block.0.weight"]
+        np.testing.assert_allclose(
+            target_weight[:, :3].detach().cpu().numpy(),
+            source_weight.detach().cpu().numpy(),
+            atol=1e-6,
+        )
+        expected_fill = source_weight.mean(dim=1, keepdim=True).detach().cpu().numpy()
+        np.testing.assert_allclose(
+            target_weight[:, 3:4].detach().cpu().numpy(),
+            expected_fill,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            target_weight[:, 4:5].detach().cpu().numpy(),
+            expected_fill,
+            atol=1e-6,
+        )
 
     def test_compute_global_geometry_loss_is_zero_for_identical_quads(self) -> None:
         corners = torch.tensor(
@@ -138,6 +381,86 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertGreater(float(high_parts["inset"]), 0.0)
         self.assertGreater(float(high_loss.item()), float(low_loss.item()))
 
+    def test_compute_global_geometry_loss_exposes_inward_boundary_penalty(self) -> None:
+        target = torch.tensor(
+            [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]]],
+            dtype=torch.float32,
+        )
+        inward_only = torch.tensor(
+            [[[0.16, 0.16], [0.84, 0.16], [0.84, 0.74], [0.16, 0.74]]],
+            dtype=torch.float32,
+        )
+
+        low_loss, low_parts = compute_global_geometry_loss(inward_only, target, inward_boundary_weight=0.1)
+        high_loss, high_parts = compute_global_geometry_loss(inward_only, target, inward_boundary_weight=1.0)
+
+        self.assertIn("inward_boundary", low_parts)
+        self.assertGreater(float(low_parts["inward_boundary"]), 0.0)
+        self.assertGreater(float(high_parts["inward_boundary"]), 0.0)
+        self.assertGreater(float(high_loss.item()), float(low_loss.item()))
+
+    def test_compute_global_geometry_loss_inward_boundary_margin_ignores_tiny_shrink(self) -> None:
+        target = torch.tensor(
+            [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]]],
+            dtype=torch.float32,
+        )
+        tiny_inward = torch.tensor(
+            [[[0.105, 0.105], [0.895, 0.105], [0.895, 0.795], [0.105, 0.795]]],
+            dtype=torch.float32,
+        )
+
+        _, zero_parts = compute_global_geometry_loss(
+            tiny_inward,
+            target,
+            inward_boundary_weight=1.0,
+            inward_boundary_margin=0.01,
+        )
+        _, active_parts = compute_global_geometry_loss(
+            tiny_inward,
+            target,
+            inward_boundary_weight=1.0,
+            inward_boundary_margin=0.0,
+        )
+
+        self.assertAlmostEqual(float(zero_parts["inward_boundary"]), 0.0, places=6)
+        self.assertGreater(float(active_parts["inward_boundary"]), 0.0)
+
+    def test_compute_global_geometry_loss_exposes_quad_mask_penalty(self) -> None:
+        target = torch.tensor(
+            [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]]],
+            dtype=torch.float32,
+        )
+        inward_only = torch.tensor(
+            [[[0.18, 0.16], [0.82, 0.16], [0.82, 0.74], [0.18, 0.74]]],
+            dtype=torch.float32,
+        )
+
+        low_loss, low_parts = compute_global_geometry_loss(inward_only, target, quad_mask_weight=0.1)
+        high_loss, high_parts = compute_global_geometry_loss(inward_only, target, quad_mask_weight=0.8)
+
+        self.assertIn("quad_mask", low_parts)
+        self.assertGreater(float(low_parts["quad_mask"]), 0.0)
+        self.assertGreater(float(high_parts["quad_mask"]), 0.0)
+        self.assertGreater(float(high_loss.item()), float(low_loss.item()))
+
+    def test_compute_global_geometry_loss_exposes_inner_boundary_band_penalty(self) -> None:
+        target = torch.tensor(
+            [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]]],
+            dtype=torch.float32,
+        )
+        inward_only = torch.tensor(
+            [[[0.16, 0.14], [0.84, 0.14], [0.84, 0.76], [0.16, 0.76]]],
+            dtype=torch.float32,
+        )
+
+        low_loss, low_parts = compute_global_geometry_loss(inward_only, target, inner_boundary_band_weight=0.05)
+        high_loss, high_parts = compute_global_geometry_loss(inward_only, target, inner_boundary_band_weight=0.4)
+
+        self.assertIn("inner_boundary_band", low_parts)
+        self.assertGreater(float(low_parts["inner_boundary_band"]), 0.0)
+        self.assertGreater(float(high_parts["inner_boundary_band"]), 0.0)
+        self.assertGreater(float(high_loss.item()), float(low_loss.item()))
+
     def test_compute_global_geometry_loss_respects_edge_line_weight(self) -> None:
         target = torch.tensor(
             [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]]],
@@ -154,6 +477,27 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertGreater(float(low_parts["edge_line_offset"]), 0.0)
         self.assertGreater(float(high_parts["edge_line_offset"]), 0.0)
         self.assertGreater(float(high_loss.item()), float(low_loss.item()))
+
+    def test_compute_global_geometry_loss_exposes_and_penalizes_edge_collapse(self) -> None:
+        target = torch.tensor(
+            [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]]],
+            dtype=torch.float32,
+        )
+        mildly_short = torch.tensor(
+            [[[0.1, 0.1], [0.78, 0.12], [0.86, 0.78], [0.12, 0.82]]],
+            dtype=torch.float32,
+        )
+        collapsed = torch.tensor(
+            [[[0.1, 0.1], [0.18, 0.11], [0.9, 0.8], [0.1, 0.8]]],
+            dtype=torch.float32,
+        )
+
+        mild_loss, mild_parts = compute_global_geometry_loss(mildly_short, target)
+        collapsed_loss, collapsed_parts = compute_global_geometry_loss(collapsed, target)
+
+        self.assertIn("edge_collapse", mild_parts)
+        self.assertGreater(float(collapsed_parts["edge_collapse"]), float(mild_parts["edge_collapse"]))
+        self.assertGreater(float(collapsed_loss.item()), float(mild_loss.item()))
 
     def test_compute_edge_supervision_loss_is_near_zero_for_identical_quads(self) -> None:
         corners = torch.tensor(
@@ -208,6 +552,84 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertAlmostEqual(float(weights.mean()), 1.0, places=6)
         self.assertGreater(float(weights[1]), float(weights[0]))
 
+    def test_global_corner_dataset_build_sample_weights_boosts_disagreement_and_geometry_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((120, 200, 3), dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            rows = [
+                {
+                    "page_id": "baseline",
+                    "image_path": str(image_path),
+                    "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                    "adaptive_weight": 1.0,
+                    "teacher_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                    "teacher_r3_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                },
+                {
+                    "page_id": "disagreement",
+                    "image_path": str(image_path),
+                    "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                    "adaptive_weight": 1.0,
+                    "teacher_quad": [[30, 28], [172, 22], [176, 96], [24, 98]],
+                    "teacher_r3_quad": [[16, 16], [184, 16], [184, 104], [16, 104]],
+                },
+                {
+                    "page_id": "geometry",
+                    "image_path": str(image_path),
+                    "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                    "adaptive_weight": 1.0,
+                    "scene_tags": ["near_color_background", "low_contrast_scene", "black_frame_scene"],
+                    "scene_profile": {"lab_distance": 19.0, "luma_delta": 0.06, "edge_strength": 0.42},
+                },
+            ]
+            manifest = root / "train.jsonl"
+            manifest.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, input_size=128, output_size=32, augment=False)
+            weights = dataset.build_sample_weights(
+                power=0.0,
+                disagreement_floor=0.01,
+                disagreement_boost=1.5,
+                geometry_priority_boost=1.25,
+            )
+
+        self.assertAlmostEqual(float(weights.mean()), 1.0, places=6)
+        self.assertGreater(float(weights[1]), float(weights[0]))
+        self.assertGreater(float(weights[2]), float(weights[0]))
+
+    def test_global_corner_dataset_build_sample_weights_boosts_high_hardness_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((120, 200, 3), dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            rows = [
+                {
+                    "page_id": "easy",
+                    "image_path": str(image_path),
+                    "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                    "adaptive_weight": 1.0,
+                    "hardness_score": 0.5,
+                },
+                {
+                    "page_id": "hard",
+                    "image_path": str(image_path),
+                    "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                    "adaptive_weight": 1.0,
+                    "hardness_score": 8.0,
+                },
+            ]
+            manifest = root / "train.jsonl"
+            manifest.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, input_size=128, output_size=32, augment=False)
+            weights = dataset.build_sample_weights(power=0.0, hardness_score_power=0.5)
+
+        self.assertAlmostEqual(float(weights.mean()), 1.0, places=6)
+        self.assertGreater(float(weights[1]), float(weights[0]))
+
     def test_global_corner_dataset_reads_scene_tags_from_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -228,6 +650,32 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertEqual(dataset.rows[0]["scene_tags"], ["near_color_background", "low_contrast_scene"])
         self.assertGreater(float(item["geometry_scale"]), 1.0)
 
+    def test_geometry_priority_low_contrast_scene_uses_profile_even_without_tags(self) -> None:
+        row = {
+            "scene_tags": [],
+            "scene_profile": {
+                "lab_distance": 21.2,
+                "luma_delta": 0.077,
+                "edge_strength": 0.49,
+                "inner_border_contrast": 0.01,
+            },
+        }
+
+        self.assertTrue(is_geometry_priority_low_contrast_scene(row))
+
+    def test_geometry_priority_low_contrast_scene_rejects_high_separation_profile(self) -> None:
+        row = {
+            "scene_tags": [],
+            "scene_profile": {
+                "lab_distance": 47.0,
+                "luma_delta": 0.10,
+                "edge_strength": 0.38,
+                "inner_border_contrast": 0.04,
+            },
+        }
+
+        self.assertFalse(is_geometry_priority_low_contrast_scene(row))
+
     def test_global_corner_dataset_geometry_scale_is_lower_for_untagged_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -245,6 +693,271 @@ class GlobalCornerTrainTests(unittest.TestCase):
             item = dataset[0]
 
         self.assertLess(float(item["geometry_scale"]), 1.0)
+
+    def test_bootstrap_inward_geometry_scale_boosts_only_positive_inset_failures(self) -> None:
+        self.assertAlmostEqual(
+            bootstrap_inward_geometry_scale(
+                {
+                    "bootstrap_metrics": {
+                        "quad_inset_ratio": 0.0,
+                        "screen_relative_point_error": 0.02,
+                        "max_corner_error": 0.08,
+                    }
+                }
+            ),
+            1.0,
+            places=6,
+        )
+        boosted = bootstrap_inward_geometry_scale(
+            {
+                "bootstrap_metrics": {
+                    "quad_inset_ratio": 0.12,
+                    "screen_relative_point_error": 0.05,
+                    "max_corner_error": 0.16,
+                }
+            }
+        )
+        self.assertGreater(boosted, 1.3)
+
+    def test_global_corner_dataset_geometry_scale_uses_bootstrap_inward_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "bootstrap_metrics": {
+                    "quad_inset_ratio": 0.10,
+                    "screen_relative_point_error": 0.04,
+                    "max_corner_error": 0.12,
+                },
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, input_size=128, output_size=32, augment=False)
+            item = dataset[0]
+
+        self.assertGreater(float(item["geometry_scale"]), 1.2)
+
+    def test_build_adaptive_teacher_target_blends_only_reliable_teacher_corners(self) -> None:
+        manual = np.array(
+            [[0.10, 0.10], [0.90, 0.10], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        teacher = np.array(
+            [[0.12, 0.11], [0.88, 0.11], [0.70, 0.68], [0.09, 0.80]],
+            dtype=np.float32,
+        )
+
+        target, guidance_scale = build_adaptive_teacher_target(
+            manual,
+            teacher,
+            blend_ratio=0.5,
+            corner_error_max=0.04,
+            sample_error_max=0.08,
+        )
+
+        np.testing.assert_allclose(target[0], np.array([0.11, 0.105], dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(target[1], np.array([0.89, 0.105], dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(target[2], manual[2], atol=1e-6)
+        np.testing.assert_allclose(target[3], np.array([0.095, 0.80], dtype=np.float32), atol=1e-6)
+        self.assertAlmostEqual(guidance_scale, 0.75, places=6)
+
+    def test_build_multi_teacher_target_selects_best_corner_per_source(self) -> None:
+        manual = np.array(
+            [[0.10, 0.10], [0.90, 0.10], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        candidate_quads = np.array(
+            [
+                [[0.105, 0.105], [0.96, 0.12], [0.92, 0.83], [0.15, 0.83]],
+                [[0.13, 0.12], [0.905, 0.105], [0.89, 0.79], [0.10, 0.96]],
+                [[0.12, 0.11], [0.92, 0.11], [0.902, 0.801], [0.098, 0.802]],
+            ],
+            dtype=np.float32,
+        )
+
+        target, guidance_scale, selected_index = build_multi_teacher_target(
+            manual,
+            candidate_quads,
+            blend_ratio=1.0,
+            corner_error_max=0.03,
+        )
+
+        expected = np.array(
+            [[0.105, 0.105], [0.905, 0.105], [0.902, 0.801], [0.098, 0.802]],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(target, expected, atol=1e-6)
+        self.assertAlmostEqual(guidance_scale, 1.0, places=6)
+        self.assertEqual(selected_index.tolist(), [0, 1, 2, 2])
+
+    def test_build_multi_teacher_target_ignores_masked_candidates(self) -> None:
+        manual = np.array(
+            [[0.10, 0.10], [0.90, 0.10], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        candidate_quads = np.array(
+            [
+                [[0.1005, 0.1005], [0.9005, 0.1005], [0.9005, 0.8005], [0.1005, 0.8005]],
+                [[0.11, 0.11], [0.91, 0.11], [0.91, 0.81], [0.11, 0.81]],
+            ],
+            dtype=np.float32,
+        )
+        candidate_mask = np.array([False, True], dtype=bool)
+
+        target, guidance_scale, selected_index = build_multi_teacher_target(
+            manual,
+            candidate_quads,
+            blend_ratio=1.0,
+            candidate_mask=candidate_mask,
+            corner_error_max=0.03,
+        )
+
+        np.testing.assert_allclose(target, candidate_quads[1], atol=1e-6)
+        self.assertAlmostEqual(guidance_scale, 1.0, places=6)
+        self.assertEqual(selected_index.tolist(), [1, 1, 1, 1])
+
+    def test_global_corner_dataset_exposes_teacher_target_and_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "teacher_quad": [[24, 21], [176, 21], [180, 100], [20, 100]],
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                teacher_blend_ratio=0.5,
+                teacher_corner_error_max=0.03,
+                teacher_sample_error_max=0.03,
+            )
+            item = dataset[0]
+
+        self.assertIn("teacher_target", item)
+        self.assertIn("teacher_guidance_scale", item)
+        self.assertGreater(float(item["teacher_guidance_scale"]), 0.0)
+        np.testing.assert_allclose(
+            item["teacher_target"][0].numpy(),
+            np.array([0.11, 0.17083333], dtype=np.float32),
+            atol=1e-6,
+        )
+
+    def test_global_corner_dataset_can_build_oracle_teacher_target_from_multiple_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "teacher_quad": [[24, 24], [184, 24], [180, 100], [20, 100]],
+                "teacher_r3_quad": [[21, 21], [192, 23], [182, 103], [28, 99]],
+                "teacher_roi_quad": [[23, 22], [181, 21], [180.5, 100.5], [19.5, 100.5]],
+                "opencv_best_quad": [[20.2, 20.2], [180.2, 20.2], [180.2, 100.2], [20.2, 100.2]],
+                "opencv_best_score": 0.62,
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                teacher_blend_ratio=1.0,
+                teacher_corner_error_max=0.03,
+                teacher_sample_error_max=0.03,
+                teacher_target_mode="oracle",
+                teacher_candidate_sources=("teacher", "r3", "roi", "opencv"),
+                teacher_opencv_score_min=0.5,
+            )
+            item = dataset[0]
+
+        self.assertIn("teacher_target", item)
+        self.assertIn("teacher_guidance_scale", item)
+        self.assertGreater(float(item["teacher_guidance_scale"]), 0.0)
+        np.testing.assert_allclose(
+            item["teacher_target"].numpy(),
+            np.array(
+                [
+                    [0.101, 0.16833334],
+                    [0.901, 0.16833334],
+                    [0.9, 0.8333333],
+                    [0.1, 0.8333333],
+                ],
+                dtype=np.float32,
+            ),
+            atol=1e-6,
+        )
+
+    def test_global_corner_dataset_disables_teacher_guidance_when_teacher_r3_disagreement_is_small(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "teacher_quad": [[21, 20], [181, 20], [180, 100], [20, 100]],
+                "teacher_r3_quad": [[21.2, 20.1], [181.1, 20.2], [180.1, 100.2], [20.1, 100.1]],
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                teacher_blend_ratio=1.0,
+                teacher_corner_error_max=0.03,
+                teacher_sample_error_max=0.03,
+                teacher_target_mode="oracle",
+                teacher_candidate_sources=("teacher", "r3"),
+                teacher_activation_min_disagreement=0.01,
+            )
+            item = dataset[0]
+
+        self.assertAlmostEqual(float(item["teacher_guidance_scale"]), 0.0, places=6)
+
+    def test_is_bootstrap_inward_hard_page_requires_positive_inset_failure(self) -> None:
+        self.assertFalse(
+            is_bootstrap_inward_hard_page(
+                {
+                    "bootstrap_metrics": {
+                        "quad_inset_ratio": -0.12,
+                        "screen_relative_point_error": 0.09,
+                        "max_corner_error": 0.18,
+                    }
+                }
+            )
+        )
+        self.assertTrue(
+            is_bootstrap_inward_hard_page(
+                {
+                    "bootstrap_metrics": {
+                        "quad_inset_ratio": 0.12,
+                        "screen_relative_point_error": 0.09,
+                        "max_corner_error": 0.18,
+                    }
+                }
+            )
+        )
 
     def test_global_corner_dataset_edge_scale_is_higher_for_narrow_screen(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -491,6 +1204,45 @@ class GlobalCornerTrainTests(unittest.TestCase):
         augmented_width = float(augmented_corners[:, 0].max() - augmented_corners[:, 0].min())
         self.assertLess(augmented_width, 0.55)
         self.assertLess(augmented_width, original_width - 0.18)
+        self.assertLess(float(augmented_corners[:, 1].mean()), float(original_corners[:, 1].mean()))
+
+    def test_global_corner_dataset_bootstrap_inward_hard_page_can_synthesize_distant_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 150, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 16], [180, 14], [176, 108], [24, 110]],
+                "bootstrap_metrics": {
+                    "quad_inset_ratio": 0.18,
+                    "screen_relative_point_error": 0.09,
+                    "max_corner_error": 0.22,
+                },
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(manifest, input_size=128, output_size=32, augment=True)
+            original_corners = np.array(
+                [[0.10, 0.13333334], [0.90, 0.11666667], [0.88, 0.90], [0.12, 0.9166667]],
+                dtype=np.float32,
+            )
+            row = sample
+
+            with (
+                mock.patch("global_corner_train.random.random", side_effect=[0.9, 0.18, 0.9, 0.9]),
+                mock.patch(
+                    "global_corner_train.random.uniform",
+                    side_effect=[0.82, 0.01, -0.05, 1.0, 0.0],
+                ),
+            ):
+                _, augmented_corners = dataset._augment(image.copy(), original_corners.copy(), row)
+
+        original_width = float(original_corners[:, 0].max() - original_corners[:, 0].min())
+        augmented_width = float(augmented_corners[:, 0].max() - augmented_corners[:, 0].min())
+        self.assertLess(augmented_width, original_width - 0.10)
         self.assertLess(float(augmented_corners[:, 1].mean()), float(original_corners[:, 1].mean()))
 
     def test_compute_corner_weighted_coord_loss_emphasizes_bottom_corners(self) -> None:
@@ -775,6 +1527,199 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertAlmostEqual(float(checkpoint["edge_length_weight"]), 0.6, places=6)
         self.assertAlmostEqual(float(checkpoint["corner_line_weight"]), 0.9, places=6)
         self.assertAlmostEqual(float(checkpoint["corner_angle_weight"]), 0.35, places=6)
+
+    def test_train_global_corner_model_saves_teacher_guidance_metadata_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((96, 160, 3), 200, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            row = {
+                "page_id": "sample",
+                "project_name": "demo",
+                "image_path": str(image_path),
+                "manual_quad": [[16, 12], [144, 12], [144, 84], [16, 84]],
+                "teacher_quad": [[18, 13], [142, 13], [144, 84], [16, 84]],
+            }
+            split_dir = root / "split"
+            split_dir.mkdir()
+            payload = json.dumps(row, ensure_ascii=False) + "\n"
+            for name in ("train", "test"):
+                (split_dir / f"{name}.jsonl").write_text(payload, encoding="utf-8")
+
+            result = train_global_corner_model(
+                dataset_root=root,
+                output_dir=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-3,
+                input_size=64,
+                output_size=16,
+                channels=8,
+                split_dir=split_dir,
+                teacher_guidance_weight=0.35,
+                teacher_blend_ratio=0.5,
+                teacher_corner_error_max=0.03,
+                teacher_sample_error_max=0.03,
+                teacher_activation_min_disagreement=0.01,
+            )
+
+            checkpoint = torch.load(result.model_path, map_location="cpu")
+
+        self.assertAlmostEqual(float(checkpoint["teacher_guidance_weight"]), 0.35, places=6)
+        self.assertAlmostEqual(float(checkpoint["teacher_blend_ratio"]), 0.5, places=6)
+        self.assertAlmostEqual(float(checkpoint["teacher_corner_error_max"]), 0.03, places=6)
+        self.assertAlmostEqual(float(checkpoint["teacher_sample_error_max"]), 0.03, places=6)
+        self.assertAlmostEqual(float(checkpoint["teacher_activation_min_disagreement"]), 0.01, places=6)
+
+    def test_train_global_corner_model_saves_sample_reweight_metadata_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((96, 160, 3), 200, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            row = {
+                "page_id": "sample",
+                "project_name": "demo",
+                "image_path": str(image_path),
+                "manual_quad": [[16, 12], [144, 12], [144, 84], [16, 84]],
+                "teacher_quad": [[18, 13], [142, 13], [144, 84], [16, 84]],
+                "teacher_r3_quad": [[14, 11], [146, 11], [146, 86], [14, 86]],
+                "scene_tags": ["near_color_background", "low_contrast_scene", "black_frame_scene"],
+                "scene_profile": {"lab_distance": 18.5, "luma_delta": 0.058, "edge_strength": 0.44},
+            }
+            split_dir = root / "split"
+            split_dir.mkdir()
+            payload = json.dumps(row, ensure_ascii=False) + "\n"
+            for name in ("train", "test"):
+                (split_dir / f"{name}.jsonl").write_text(payload, encoding="utf-8")
+
+            result = train_global_corner_model(
+                dataset_root=root,
+                output_dir=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-3,
+                input_size=64,
+                output_size=16,
+                channels=8,
+                split_dir=split_dir,
+                disagreement_sample_weight_floor=0.01,
+                disagreement_sample_weight_boost=1.6,
+                geometry_priority_sample_weight_boost=1.2,
+            )
+
+            checkpoint = torch.load(result.model_path, map_location="cpu")
+
+        self.assertAlmostEqual(float(checkpoint["disagreement_sample_weight_floor"]), 0.01, places=6)
+        self.assertAlmostEqual(float(checkpoint["disagreement_sample_weight_boost"]), 1.6, places=6)
+        self.assertAlmostEqual(float(checkpoint["geometry_priority_sample_weight_boost"]), 1.2, places=6)
+
+    def test_train_global_corner_model_saves_hardness_sample_weight_power_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((96, 160, 3), 200, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            row = {
+                "page_id": "sample",
+                "project_name": "demo",
+                "image_path": str(image_path),
+                "manual_quad": [[16, 12], [144, 12], [144, 84], [16, 84]],
+                "hardness_score": 6.0,
+            }
+            split_dir = root / "split"
+            split_dir.mkdir()
+            payload = json.dumps(row, ensure_ascii=False) + "\n"
+            for name in ("train", "test"):
+                (split_dir / f"{name}.jsonl").write_text(payload, encoding="utf-8")
+
+            result = train_global_corner_model(
+                dataset_root=root,
+                output_dir=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-3,
+                input_size=64,
+                output_size=16,
+                channels=8,
+                split_dir=split_dir,
+                hardness_sample_weight_power=0.4,
+            )
+
+            checkpoint = torch.load(result.model_path, map_location="cpu")
+
+        self.assertAlmostEqual(float(checkpoint["hardness_sample_weight_power"]), 0.4, places=6)
+
+    def test_train_global_corner_model_saves_quad_mask_weight_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((96, 160, 3), 200, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            row = {
+                "page_id": "sample",
+                "project_name": "demo",
+                "image_path": str(image_path),
+                "manual_quad": [[16, 12], [144, 12], [144, 84], [16, 84]],
+            }
+            split_dir = root / "split"
+            split_dir.mkdir()
+            payload = json.dumps(row, ensure_ascii=False) + "\n"
+            for name in ("train", "test"):
+                (split_dir / f"{name}.jsonl").write_text(payload, encoding="utf-8")
+
+            result = train_global_corner_model(
+                dataset_root=root,
+                output_dir=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-3,
+                input_size=64,
+                output_size=16,
+                channels=8,
+                split_dir=split_dir,
+                quad_mask_weight=0.3,
+            )
+
+            checkpoint = torch.load(result.model_path, map_location="cpu")
+
+        self.assertAlmostEqual(float(checkpoint["quad_mask_weight"]), 0.3, places=6)
+
+    def test_train_global_corner_model_saves_inner_boundary_band_weight_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((96, 160, 3), 200, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            row = {
+                "page_id": "sample",
+                "project_name": "demo",
+                "image_path": str(image_path),
+                "manual_quad": [[16, 12], [144, 12], [144, 84], [16, 84]],
+            }
+            split_dir = root / "split"
+            split_dir.mkdir()
+            payload = json.dumps(row, ensure_ascii=False) + "\n"
+            for name in ("train", "test"):
+                (split_dir / f"{name}.jsonl").write_text(payload, encoding="utf-8")
+
+            result = train_global_corner_model(
+                dataset_root=root,
+                output_dir=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-3,
+                input_size=64,
+                output_size=16,
+                channels=8,
+                split_dir=split_dir,
+                inner_boundary_band_weight=0.2,
+            )
+
+            checkpoint = torch.load(result.model_path, map_location="cpu")
+
+        self.assertAlmostEqual(float(checkpoint["inner_boundary_band_weight"]), 0.2, places=6)
 
 
 if __name__ == "__main__":
