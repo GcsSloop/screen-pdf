@@ -2,8 +2,9 @@ import "./styles.css";
 
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import appIconUrl from "../icons/screen-pdf-desktop.png";
+import { defaultOutputPath, projectDirectoryName, projectSavePath } from "./lib/project-paths";
 import { buildCandidateDebugLabel, buildCandidateRowMeta, buildCandidateTitle } from "./lib/candidate-display";
 import {
   clearCandidateManualOverride,
@@ -122,8 +123,8 @@ const DEFAULT_EXPORT_OPTIONS = (): ExportOptions => ({
   exportAllPages: true,
   includeAutoReady: true,
   minAutoReadyConfidence: 0.2,
-  jpegQuality: 82,
-  maxDimension: 2200,
+  jpegQuality: 92,
+  maxDimension: 3000,
   ocrEnabled: true,
   ocrLanguages: "chi_sim+eng"
 });
@@ -157,8 +158,8 @@ app.innerHTML = `
           ${renderToolbarButton("toggleExportSettingsBtn")}
           <div id="exportPopover" class="toolbar-popover hidden">
             <div class="toolbar-popover-head">
-              <h3>导出配置</h3>
-              <span>点击导出时立即生效</span>
+              <h3>导出选项</h3>
+              <span>修改后立即生效</span>
             </div>
             <div class="form-grid">
               <label>输出 PDF</label>
@@ -170,7 +171,7 @@ app.innerHTML = `
                 <input id="exportAllPagesInput" type="checkbox" checked />
                 导出所有页面
               </label>
-              <div class="export-tip">默认包含待确认页面；关闭后按页面状态与自动就绪阈值筛选。</div>
+              <div class="export-tip">默认包含待确认页面；关闭后按页面状态和自动就绪阈值筛选。</div>
               <label class="check-row">
                 <input id="includeAutoReadyInput" type="checkbox" checked />
                 包含可信的自动就绪页面
@@ -178,16 +179,16 @@ app.innerHTML = `
               <label>自动就绪最低置信度</label>
               <input id="minConfidenceInput" type="number" min="0" max="1" step="0.01" value="0.2" />
               <label>JPEG 质量</label>
-              <input id="jpegQualityInput" type="number" min="40" max="100" step="1" value="82" />
+              <input id="jpegQualityInput" type="number" min="40" max="100" step="1" value="92" />
               <label>最长边尺寸</label>
-              <input id="maxDimensionInput" type="number" min="1200" max="4000" step="100" value="2200" />
+              <input id="maxDimensionInput" type="number" min="1200" max="4000" step="100" value="3000" />
               <label class="check-row">
                 <input id="ocrEnabledInput" type="checkbox" checked />
                 启用 OCR 隐藏文本层
               </label>
               <label>OCR 语言</label>
               <input id="ocrLanguagesInput" type="text" value="chi_sim+eng" />
-              <div id="exportStatus" class="status-panel empty">打开文件夹后即可配置导出。</div>
+              <div id="exportStatus" class="status-panel empty">打开项目后可设置导出选项。</div>
             </div>
           </div>
         </div>
@@ -198,14 +199,14 @@ app.innerHTML = `
       <span id="projectName" class="meta-pill project-pill">未打开项目</span>
       <span id="pageCount" class="meta-pill">0 页</span>
       <span id="reviewCount" class="meta-pill accent-pill">0 页待确认</span>
-      <button id="checkUpdateBtn" class="meta-pill update-pill" type="button">检查更新</button>
+      <button id="checkUpdateBtn" class="meta-pill update-pill" type="button">检查版本更新</button>
     </div>
   </div>
   <div class="layout">
     <aside class="panel panel-pages">
       <div class="section-head">
         <h2>页面</h2>
-        <span id="pageOrderHint" class="section-tip">默认按创建时间排序</span>
+        <span id="pageOrderHint" class="section-tip">按创建时间排序</span>
       </div>
       <div id="pageList" class="page-list"></div>
     </aside>
@@ -227,9 +228,9 @@ app.innerHTML = `
       </div>
       <div class="editor-actions">
         <div class="hintbar">
-          <span>四个锚点可独立拖动，松手后自动应用裁剪</span>
-          <span>左侧拖拽顺序即导出顺序</span>
-          <span>右侧保留一个人工标注候选，并显示 base 来源</span>
+          <span>支持角点独立拖动，松手后自动裁剪</span>
+          <span>支持拖拽调整导出顺序</span>
+          <span>仅保留一个人工标注候选，并展示 base 来源</span>
         </div>
       </div>
     </main>
@@ -244,7 +245,7 @@ app.innerHTML = `
       </div>
       <div class="section">
         <h3>当前页面</h3>
-        <div id="pageMeta" class="metrics empty">打开文件夹后开始处理。</div>
+        <div id="pageMeta" class="metrics empty">打开项目后开始编辑。</div>
       </div>
     </aside>
   </div>
@@ -353,21 +354,21 @@ let scanUiState: {
 function updateButtonLabel(payload: UpdateStatePayload): string {
   switch (payload.status) {
     case "checking":
-      return "检查更新中...";
+      return "正在检查更新";
     case "up-to-date":
-      return "已是最新版本";
+      return "当前已是最新版本";
     case "available":
       return `安装更新 ${payload.update?.version ?? ""}`.trim();
     case "downloading":
       return payload.progress ? `下载更新 ${payload.progress.percent.toFixed(0)}%` : "正在安装更新...";
     case "ready":
-      return "更新已就绪，重启生效";
+      return "更新已准备好，重启后生效";
     case "error":
       return "更新失败，点击重试";
     case "unsupported":
       return "当前平台不支持自动更新";
     default:
-      return "检查更新";
+      return "检查版本更新";
   }
 }
 
@@ -385,7 +386,7 @@ function renderUpdateButton() {
         ? "更新包已安装，重启程序后生效"
         : updateState.status === "error"
           ? updateState.error ?? "自动更新失败"
-          : updateState.update?.body ?? "从 GitHub Release 检查桌面端更新";
+          : updateState.update?.body ?? "从 GitHub Release 检查桌面版更新。";
   checkUpdateBtn.title = details;
 }
 
@@ -547,15 +548,6 @@ async function loadDisplayImage(
   throw lastError ?? new Error(`failed to load image for ${page.name}`);
 }
 
-function sanitizeFileName(value: string): string {
-  const normalized = value.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, "-");
-  return normalized || "screen-pdf-export";
-}
-
-function defaultOutputPath(project: ProjectFile): string {
-  return `${project.sourceDir}/${sanitizeFileName(project.name)}.pdf`;
-}
-
 function getActivePage(): PageRecord | null {
   if (!state.project || !state.activePage) {
     return null;
@@ -638,6 +630,7 @@ function setProject(project: ProjectFile) {
   clearHoverMagnifierIntent();
   hoverMagnifierHandle = null;
   project = normalizeProjectDataStructure(project);
+  project.name = projectDirectoryName(project);
   const activePage = resolveActivePage(project);
   state.activePage = activePage;
   state.project = withSelectedPage(project, activePage?.id ?? null);
@@ -829,7 +822,7 @@ function renderPageList() {
   thumbObserver?.disconnect();
   pageList.innerHTML = "";
   if (!project) {
-    pageOrderHint.textContent = "默认按创建时间排序";
+    pageOrderHint.textContent = "按创建时间排序";
     pageList.innerHTML = `<div class="empty">打开文件夹或加载项目文件。</div>`;
     return;
   }
@@ -1096,7 +1089,7 @@ async function renderActivePage() {
   if (!page) {
     currentImage = null;
     currentImageUsesFallback = false;
-    pageMeta.innerHTML = `<div class="empty">打开文件夹后开始处理。</div>`;
+    pageMeta.innerHTML = `<div class="empty">打开项目后开始编辑。</div>`;
     candidateList.innerHTML = "";
     previewImage.removeAttribute("src");
     drawCanvas(null);
@@ -1336,16 +1329,14 @@ async function commitDraftQuad() {
 
 async function chooseOutputPath() {
   if (!state.project) return;
-  const file = await save({
-    defaultPath: exportOptions.outputPath || defaultOutputPath(state.project),
-    filters: [{ name: "PDF", extensions: ["pdf"] }]
+  const directory = await open({
+    directory: true,
+    multiple: false,
+    defaultPath: state.project.sourceDir
   });
-  if (!file) return;
-  exportOptions.outputPath = file;
-  exportState = {
-    mode: "idle",
-    result: null
-  };
+  if (!directory || Array.isArray(directory)) return;
+  exportOptions.outputPath = defaultOutputPath(state.project, directory);
+  exportState = { mode: "idle", result: null };
   renderExportSection();
 }
 
@@ -1355,8 +1346,8 @@ function syncExportOptionsFromInputs() {
     exportAllPages: exportAllPagesInput.checked,
     includeAutoReady: includeAutoReadyInput.checked,
     minAutoReadyConfidence: Number.parseFloat(minConfidenceInput.value) || 0,
-    jpegQuality: Math.max(40, Math.min(100, Number.parseInt(jpegQualityInput.value, 10) || 82)),
-    maxDimension: Math.max(1200, Number.parseInt(maxDimensionInput.value, 10) || 2200),
+    jpegQuality: Math.max(40, Math.min(100, Number.parseInt(jpegQualityInput.value, 10) || 92)),
+    maxDimension: Math.max(1200, Number.parseInt(maxDimensionInput.value, 10) || 3000),
     ocrEnabled: ocrEnabledInput.checked,
     ocrLanguages: ocrLanguagesInput.value.trim() || "eng"
   };
@@ -1485,18 +1476,12 @@ loadProjectBtn.addEventListener("click", async () => {
 
 saveProjectBtn.addEventListener("click", async () => {
   if (!state.project) return;
-  const defaultPath = state.project.projectPath ?? `${state.project.sourceDir}/screen-pdf-project.json`;
-  const file = await save({
-    defaultPath,
-    filters: [{ name: "Project", extensions: ["json"] }]
-  });
-  if (!file) return;
   try {
     const path = await invoke<string>("save_project", {
-      projectPath: file,
       project: withSelectedPage(state.project, state.activePage?.id ?? null)
     });
-    state.project.projectPath = path;
+    state.project.projectPath = path || projectSavePath(state.project);
+    state.project.name = projectDirectoryName(state.project);
     renderMeta();
   } catch (error) {
     showAppError(String(error));

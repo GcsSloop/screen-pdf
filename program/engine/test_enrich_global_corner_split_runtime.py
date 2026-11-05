@@ -16,7 +16,7 @@ class EnrichGlobalCornerSplitRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "diagnostics.json"
             payload = {
-                "runtime_examples": [
+                "selector_examples": [
                     {
                         "page_id": "p1",
                         "image_path": "/tmp/a.jpg",
@@ -36,6 +36,26 @@ class EnrichGlobalCornerSplitRuntimeTests(unittest.TestCase):
 
         self.assertIn(("p1", "/tmp/a.jpg"), index)
         self.assertEqual(index[("p1", "/tmp/a.jpg")]["category"], "runtime_candidate_recoverable")
+
+    def test_load_failure_layer_index_keeps_backward_compatibility_for_runtime_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "diagnostics.json"
+            payload = {
+                "runtime_examples": [
+                    {
+                        "page_id": "p1-old",
+                        "image_path": "/tmp/old.jpg",
+                        "category": "runtime_candidate_recoverable",
+                    }
+                ],
+                "opencv_examples": [],
+                "hard_examples": [],
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            index = load_failure_layer_index(path)
+
+        self.assertIn(("p1-old", "/tmp/old.jpg"), index)
 
     def test_merge_failure_layer_fields_writes_category_and_gain_fields(self) -> None:
         row = {

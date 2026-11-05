@@ -20,6 +20,9 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from corner_train import CornerHeatmapNet, build_corner_heatmaps, decode_heatmaps, select_torch_device
 from dataset_benchmark import (
+    METRIC_CONTRACT,
+    checkpoint_selection_key,
+    normalized_quad_geometry_metrics,
     build_project_aware_split,
     build_split,
     load_manual_pages,
@@ -328,6 +331,7 @@ def build_multi_teacher_target(
     *,
     blend_ratio: float,
     candidate_mask: np.ndarray | None = None,
+    candidate_penalty: np.ndarray | None = None,
     corner_error_max: float | None = None,
     sample_error_max: float | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray]:
@@ -345,20 +349,40 @@ def build_multi_teacher_target(
     if diag <= 1e-6:
         return manual.copy(), 0.0, selected_index
     if candidate_mask is None:
-        valid_candidates = np.ones((candidates.shape[0],), dtype=bool)
+        corner_candidate_mask = np.ones((candidates.shape[0], 4), dtype=bool)
     else:
-        valid_candidates = np.array(candidate_mask, dtype=bool).reshape(-1)
-        if valid_candidates.shape[0] != candidates.shape[0]:
-            raise ValueError("candidate_mask length must match candidate count")
-    if not np.any(valid_candidates):
+        raw_mask = np.array(candidate_mask, dtype=bool)
+        if raw_mask.ndim == 1:
+            if raw_mask.shape[0] != candidates.shape[0]:
+                raise ValueError("candidate_mask length must match candidate count")
+            corner_candidate_mask = np.repeat(raw_mask[:, None], 4, axis=1)
+        elif raw_mask.ndim == 2:
+            if raw_mask.shape != (candidates.shape[0], 4):
+                raise ValueError("candidate_mask must have shape [candidate_count, 4]")
+            corner_candidate_mask = raw_mask
+        else:
+            raise ValueError("candidate_mask must be 1D or 2D")
+    if not np.any(corner_candidate_mask):
         return manual.copy(), 0.0, selected_index
 
     corner_errors = np.linalg.norm(candidates - manual[None, :, :], axis=2) / diag
-    corner_errors[~valid_candidates, :] = np.inf
-    best_errors = np.min(corner_errors, axis=0)
-    finite_mask = np.isfinite(best_errors)
+    adjusted_errors = corner_errors.copy()
+    if candidate_penalty is not None:
+        penalty = np.array(candidate_penalty, dtype=np.float32)
+        if penalty.shape != (candidates.shape[0], 4):
+            raise ValueError("candidate_penalty must have shape [candidate_count, 4]")
+        adjusted_errors = adjusted_errors + penalty
+    adjusted_errors[~corner_candidate_mask] = np.inf
+    best_adjusted = np.min(adjusted_errors, axis=0)
+    finite_mask = np.isfinite(best_adjusted)
     if np.any(finite_mask):
-        selected_index[finite_mask] = np.argmin(corner_errors[:, finite_mask], axis=0).astype(np.int64)
+        selected_index[finite_mask] = np.argmin(adjusted_errors[:, finite_mask], axis=0).astype(np.int64)
+    best_errors = np.full((4,), np.inf, dtype=np.float32)
+    for corner_index in range(4):
+        candidate_index = int(selected_index[corner_index])
+        if candidate_index >= 0:
+            best_errors[corner_index] = corner_errors[candidate_index, corner_index]
+    finite_mask = np.isfinite(best_errors)
     if sample_error_max is not None and float(sample_error_max) > 0.0:
         sample_error = float(np.mean(np.where(finite_mask, best_errors, 1e6)))
         if sample_error > float(sample_error_max):
@@ -379,6 +403,159 @@ def build_multi_teacher_target(
     return np.clip(target, 0.0, 1.0), guidance_scale, selected_index
 
 
+def build_teacher_candidate_corner_mask(
+    manual_corners: np.ndarray,
+    candidate_corners: np.ndarray | None,
+    *,
+    candidate_sources: tuple[str, ...] | list[str] | None,
+    opencv_agreement_corner_max: float | None = None,
+    opencv_agreement_sample_max: float | None = None,
+) -> np.ndarray | None:
+    if candidate_corners is None or candidate_sources is None:
+        return None
+    if (
+        (opencv_agreement_corner_max is None or float(opencv_agreement_corner_max) <= 0.0)
+        and (opencv_agreement_sample_max is None or float(opencv_agreement_sample_max) <= 0.0)
+    ):
+        return None
+
+    candidates = np.array(candidate_corners, dtype=np.float32)
+    if candidates.ndim == 2:
+        candidates = candidates[None, ...]
+    if candidates.size == 0:
+        return None
+
+    sources = [str(source).strip().lower() for source in candidate_sources]
+    if len(sources) != candidates.shape[0]:
+        raise ValueError("candidate_sources length must match candidate count")
+
+    primary_index = -1
+    for preferred in ("teacher", "roi", "r3", "v28"):
+        try:
+            primary_index = sources.index(preferred)
+            break
+        except ValueError:
+            continue
+    if primary_index < 0:
+        return None
+
+    opencv_indices = [index for index, source in enumerate(sources) if source == "opencv"]
+    if not opencv_indices:
+        return None
+
+    manual = np.array(manual_corners, dtype=np.float32)
+    bbox = np.amax(manual, axis=0) - np.amin(manual, axis=0)
+    diag = float(np.linalg.norm(np.clip(bbox, 1e-6, None)))
+    if diag <= 1e-6:
+        return None
+
+    mask = np.ones((candidates.shape[0], 4), dtype=bool)
+    primary = candidates[primary_index]
+    for opencv_index in opencv_indices:
+        disagreements = np.linalg.norm(candidates[opencv_index] - primary, axis=1) / diag
+        if opencv_agreement_sample_max is not None and float(opencv_agreement_sample_max) > 0.0:
+            if float(disagreements.mean()) > float(opencv_agreement_sample_max):
+                mask[opencv_index, :] = False
+                continue
+        if opencv_agreement_corner_max is not None and float(opencv_agreement_corner_max) > 0.0:
+            mask[opencv_index, :] &= disagreements <= float(opencv_agreement_corner_max)
+    return mask
+
+
+def build_teacher_candidate_corner_penalty(
+    manual_corners: np.ndarray,
+    candidate_corners: np.ndarray | None,
+    *,
+    candidate_sources: tuple[str, ...] | list[str] | None,
+    opencv_agreement_corner_max: float | None = None,
+    opencv_agreement_sample_max: float | None = None,
+    penalty_scale: float = 0.0,
+) -> np.ndarray | None:
+    if candidate_corners is None or candidate_sources is None or float(penalty_scale) <= 0.0:
+        return None
+
+    candidates = np.array(candidate_corners, dtype=np.float32)
+    if candidates.ndim == 2:
+        candidates = candidates[None, ...]
+    if candidates.size == 0:
+        return None
+
+    sources = [str(source).strip().lower() for source in candidate_sources]
+    if len(sources) != candidates.shape[0]:
+        raise ValueError("candidate_sources length must match candidate count")
+
+    primary_index = -1
+    for preferred in ("teacher", "roi", "r3", "v28"):
+        try:
+            primary_index = sources.index(preferred)
+            break
+        except ValueError:
+            continue
+    if primary_index < 0:
+        return None
+
+    opencv_indices = [index for index, source in enumerate(sources) if source == "opencv"]
+    if not opencv_indices:
+        return None
+
+    manual = np.array(manual_corners, dtype=np.float32)
+    bbox = np.amax(manual, axis=0) - np.amin(manual, axis=0)
+    diag = float(np.linalg.norm(np.clip(bbox, 1e-6, None)))
+    if diag <= 1e-6:
+        return None
+
+    penalty = np.zeros((candidates.shape[0], 4), dtype=np.float32)
+    primary = candidates[primary_index]
+    for opencv_index in opencv_indices:
+        disagreements = np.linalg.norm(candidates[opencv_index] - primary, axis=1) / diag
+        corner_over = (
+            np.maximum(disagreements - float(opencv_agreement_corner_max), 0.0)
+            if opencv_agreement_corner_max is not None and float(opencv_agreement_corner_max) > 0.0
+            else disagreements
+        )
+        sample_over = (
+            max(float(disagreements.mean()) - float(opencv_agreement_sample_max), 0.0)
+            if opencv_agreement_sample_max is not None and float(opencv_agreement_sample_max) > 0.0
+            else float(disagreements.mean())
+        )
+        penalty[opencv_index, :] = (corner_over + sample_over) * float(penalty_scale)
+    return penalty
+
+
+def build_failure_layer_teacher_candidate_mask(
+    row: dict[str, Any],
+    *,
+    candidate_sources: tuple[str, ...] | list[str] | None,
+    rewrite_min_gain: float = 0.0,
+    disable_hard_both_fail: bool = False,
+) -> np.ndarray | None:
+    if candidate_sources is None:
+        return None
+    sources = [str(source).strip().lower() for source in candidate_sources]
+    if not sources:
+        return None
+    category = str(row.get("failure_layer_category") or "").strip().lower()
+    if not category:
+        return None
+    if category == "hard_both_fail":
+        if not disable_hard_both_fail:
+            return None
+        return np.zeros((len(sources),), dtype=bool)
+    if category == "opencv_recoverable":
+        gain = float(row.get("failure_layer_opencv_gain", 0.0) or 0.0)
+        if gain < float(rewrite_min_gain):
+            return None
+        mask = np.array([source == "opencv" for source in sources], dtype=bool)
+        return mask if np.any(mask) else None
+    if category == "runtime_candidate_recoverable":
+        gain = float(row.get("failure_layer_runtime_gain", 0.0) or 0.0)
+        if gain < float(rewrite_min_gain):
+            return None
+        mask = np.array([source != "opencv" for source in sources], dtype=bool)
+        return mask if np.any(mask) else None
+    return None
+
+
 def _normalize_optional_quad(
     quad: list[list[float]] | np.ndarray | None,
     width: int,
@@ -396,8 +573,9 @@ def _resolve_teacher_candidate_quads(
     *,
     sources: tuple[str, ...],
     opencv_score_min: float | None = None,
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], list[str]]:
     candidates: list[np.ndarray] = []
+    candidate_sources: list[str] = []
     for source in sources:
         source_key = str(source).strip().lower()
         quad: np.ndarray | None = None
@@ -419,7 +597,8 @@ def _resolve_teacher_candidate_quads(
             raise ValueError(f"unsupported teacher candidate source: {source}")
         if quad is not None:
             candidates.append(quad)
-    return candidates
+            candidate_sources.append(source_key)
+    return candidates, candidate_sources
 
 
 def _apply_foreground_occluder(image: np.ndarray) -> np.ndarray:
@@ -761,7 +940,12 @@ class GlobalCornerDataset(Dataset):
         teacher_target_mode: str = "adaptive",
         teacher_candidate_sources: tuple[str, ...] = ("teacher",),
         teacher_opencv_score_min: float | None = None,
+        teacher_opencv_agreement_corner_max: float | None = None,
+        teacher_opencv_agreement_sample_max: float | None = None,
+        teacher_opencv_agreement_penalty_scale: float = 0.0,
         teacher_activation_min_disagreement: float | None = None,
+        teacher_failure_layer_rewrite_min_gain: float = 0.0,
+        teacher_failure_layer_disable_hard_both_fail: bool = False,
     ) -> None:
         self.input_size = input_size
         self.output_size = output_size
@@ -774,9 +958,18 @@ class GlobalCornerDataset(Dataset):
         self.teacher_target_mode = str(teacher_target_mode)
         self.teacher_candidate_sources = tuple(str(item) for item in teacher_candidate_sources if str(item).strip())
         self.teacher_opencv_score_min = None if teacher_opencv_score_min is None else float(teacher_opencv_score_min)
+        self.teacher_opencv_agreement_corner_max = (
+            None if teacher_opencv_agreement_corner_max is None else float(teacher_opencv_agreement_corner_max)
+        )
+        self.teacher_opencv_agreement_sample_max = (
+            None if teacher_opencv_agreement_sample_max is None else float(teacher_opencv_agreement_sample_max)
+        )
+        self.teacher_opencv_agreement_penalty_scale = float(teacher_opencv_agreement_penalty_scale)
         self.teacher_activation_min_disagreement = (
             None if teacher_activation_min_disagreement is None else float(teacher_activation_min_disagreement)
         )
+        self.teacher_failure_layer_rewrite_min_gain = float(teacher_failure_layer_rewrite_min_gain)
+        self.teacher_failure_layer_disable_hard_both_fail = bool(teacher_failure_layer_disable_hard_both_fail)
         lines = manifest_path.read_text(encoding="utf-8").splitlines()
         self.rows = [json.loads(line) for line in lines if line.strip()]
 
@@ -1141,7 +1334,7 @@ class GlobalCornerDataset(Dataset):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         height, width = image.shape[:2]
         corners = _normalize_manual_quad(row["manual_quad"], width, height)
-        teacher_candidates = _resolve_teacher_candidate_quads(
+        teacher_candidates, teacher_candidate_sources = _resolve_teacher_candidate_quads(
             row,
             width,
             height,
@@ -1155,10 +1348,37 @@ class GlobalCornerDataset(Dataset):
             image, corners = self._augment(image, corners, row)
         if self.teacher_target_mode == "oracle":
             candidate_array = np.stack(teacher_candidates, axis=0) if teacher_candidates else None
+            failure_layer_mask = build_failure_layer_teacher_candidate_mask(
+                row,
+                candidate_sources=teacher_candidate_sources,
+                rewrite_min_gain=self.teacher_failure_layer_rewrite_min_gain,
+                disable_hard_both_fail=self.teacher_failure_layer_disable_hard_both_fail,
+            )
+            candidate_mask = failure_layer_mask
+            if candidate_mask is None and self.teacher_opencv_agreement_penalty_scale <= 0.0:
+                candidate_mask = build_teacher_candidate_corner_mask(
+                    corners,
+                    candidate_array,
+                    candidate_sources=teacher_candidate_sources,
+                    opencv_agreement_corner_max=self.teacher_opencv_agreement_corner_max,
+                    opencv_agreement_sample_max=self.teacher_opencv_agreement_sample_max,
+                )
+            candidate_penalty = None
+            if failure_layer_mask is None:
+                candidate_penalty = build_teacher_candidate_corner_penalty(
+                    corners,
+                    candidate_array,
+                    candidate_sources=teacher_candidate_sources,
+                    opencv_agreement_corner_max=self.teacher_opencv_agreement_corner_max,
+                    opencv_agreement_sample_max=self.teacher_opencv_agreement_sample_max,
+                    penalty_scale=self.teacher_opencv_agreement_penalty_scale,
+                )
             teacher_target, teacher_guidance_scale, _ = build_multi_teacher_target(
                 corners,
                 candidate_array,
                 blend_ratio=self.teacher_blend_ratio,
+                candidate_mask=candidate_mask,
+                candidate_penalty=candidate_penalty,
                 corner_error_max=self.teacher_corner_error_max,
                 sample_error_max=self.teacher_sample_error_max,
             )
@@ -1178,6 +1398,7 @@ class GlobalCornerDataset(Dataset):
         heatmaps = build_corner_heatmaps(corners, output_size=self.output_size)
         return {
             "image": torch.from_numpy(build_global_feature_tensor(image, feature_mode=self.feature_mode)),
+            "image_size": torch.tensor([width, height], dtype=torch.float32),
             "heatmaps": torch.from_numpy(heatmaps),
             "corners": torch.from_numpy(corners.astype(np.float32)),
             "teacher_target": torch.from_numpy(teacher_target.astype(np.float32)),
@@ -1246,6 +1467,7 @@ def export_global_corner_split(
         else:
             split = build_split(pages, test_ratio=test_ratio, seed=seed)
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "metric_contract.json").write_text(json.dumps(METRIC_CONTRACT, indent=2) + "\n", encoding="utf-8")
     summary = {
         "dataset_root": str(dataset_root),
         "pages": len(pages),
@@ -1340,8 +1562,9 @@ def _evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dic
             losses.extend(loss.detach().cpu().repeat(images.shape[0]).tolist())
             pred_np = pred.detach().cpu().numpy()
             corners_np = corners.detach().cpu().numpy()
-            for pred_row, target_row in zip(pred_np, corners_np, strict=True):
-                metric_rows.append(quad_geometry_metrics(target_row, pred_row))
+            sizes = batch["image_size"].cpu().numpy()
+            for pred_row, target_row, size in zip(pred_np, corners_np, sizes, strict=True):
+                metric_rows.append(normalized_quad_geometry_metrics(target_row, pred_row, size))
     summary = summarize_geometry_metric_rows(metric_rows)
     return {
         "loss": float(np.mean(losses)) if losses else 0.0,
@@ -1350,6 +1573,8 @@ def _evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dic
         "point_le_0_03": float(summary["point_le_0_03_ratio"]),
         "point_le_0_02": float(summary["point_le_0_02_ratio"]),
         "point_le_0_01": float(summary["point_le_0_01_ratio"]),
+        "quad_le_0_01": float(summary["quad_le_0_01_ratio"]),
+        "point_error_px_mean": float(summary["point_error_px_mean"]),
         "screen_relative_error_mean": float(summary["screen_relative_error_mean"]),
         "max_corner_error_mean": float(summary["max_corner_error_mean"]),
         "perspective_tilt_error_mean": float(summary["perspective_tilt_error_mean"]),
@@ -1405,7 +1630,12 @@ def _save_checkpoint(
     teacher_target_mode: str,
     teacher_candidate_sources: tuple[str, ...],
     teacher_opencv_score_min: float | None,
+    teacher_opencv_agreement_corner_max: float | None,
+    teacher_opencv_agreement_sample_max: float | None,
+    teacher_opencv_agreement_penalty_scale: float,
     teacher_activation_min_disagreement: float | None,
+    teacher_failure_layer_rewrite_min_gain: float,
+    teacher_failure_layer_disable_hard_both_fail: bool,
     max_corner_weight: float,
     edge_weight: float,
     edge_line_weight: float,
@@ -1420,6 +1650,8 @@ def _save_checkpoint(
     torch.save(
         {
             "state_dict": state_dict,
+            "metric_contract": METRIC_CONTRACT,
+            "checkpoint_selection": "point_le_0_01_only_keep_earliest_tie",
             "input_size": input_size,
             "output_size": output_size,
             "channels": channels,
@@ -1457,11 +1689,24 @@ def _save_checkpoint(
             "teacher_target_mode": str(teacher_target_mode),
             "teacher_candidate_sources": [str(item) for item in teacher_candidate_sources],
             "teacher_opencv_score_min": None if teacher_opencv_score_min is None else float(teacher_opencv_score_min),
+            "teacher_opencv_agreement_corner_max": (
+                None
+                if teacher_opencv_agreement_corner_max is None
+                else float(teacher_opencv_agreement_corner_max)
+            ),
+            "teacher_opencv_agreement_sample_max": (
+                None
+                if teacher_opencv_agreement_sample_max is None
+                else float(teacher_opencv_agreement_sample_max)
+            ),
+            "teacher_opencv_agreement_penalty_scale": float(teacher_opencv_agreement_penalty_scale),
             "teacher_activation_min_disagreement": (
                 None
                 if teacher_activation_min_disagreement is None
                 else float(teacher_activation_min_disagreement)
             ),
+            "teacher_failure_layer_rewrite_min_gain": float(teacher_failure_layer_rewrite_min_gain),
+            "teacher_failure_layer_disable_hard_both_fail": bool(teacher_failure_layer_disable_hard_both_fail),
             "max_corner_weight": float(max_corner_weight),
             "edge_weight": float(edge_weight),
             "edge_line_weight": float(edge_line_weight),
@@ -1513,7 +1758,12 @@ def train_global_corner_model(
     teacher_target_mode: str = "adaptive",
     teacher_candidate_sources: tuple[str, ...] = ("teacher",),
     teacher_opencv_score_min: float | None = None,
+    teacher_opencv_agreement_corner_max: float | None = None,
+    teacher_opencv_agreement_sample_max: float | None = None,
+    teacher_opencv_agreement_penalty_scale: float = 0.0,
     teacher_activation_min_disagreement: float | None = None,
+    teacher_failure_layer_rewrite_min_gain: float = 0.0,
+    teacher_failure_layer_disable_hard_both_fail: bool = False,
     max_corner_weight: float = 1.15,
     edge_weight: float = 0.35,
     edge_line_weight: float = 0.9,
@@ -1532,6 +1782,7 @@ def train_global_corner_model(
     np.random.seed(seed)
     torch.manual_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "metric_contract.json").write_text(json.dumps(METRIC_CONTRACT, indent=2) + "\n", encoding="utf-8")
     active_split_dir = split_dir or (output_dir / "split")
     if split_dir is None:
         export_global_corner_split(dataset_root, active_split_dir, seed=seed, test_ratio=0.25)
@@ -1560,7 +1811,12 @@ def train_global_corner_model(
         teacher_target_mode=teacher_target_mode,
         teacher_candidate_sources=teacher_candidate_sources,
         teacher_opencv_score_min=teacher_opencv_score_min,
+        teacher_opencv_agreement_corner_max=teacher_opencv_agreement_corner_max,
+        teacher_opencv_agreement_sample_max=teacher_opencv_agreement_sample_max,
+        teacher_opencv_agreement_penalty_scale=teacher_opencv_agreement_penalty_scale,
         teacher_activation_min_disagreement=teacher_activation_min_disagreement,
+        teacher_failure_layer_rewrite_min_gain=teacher_failure_layer_rewrite_min_gain,
+        teacher_failure_layer_disable_hard_both_fail=teacher_failure_layer_disable_hard_both_fail,
     )
     test_dataset = GlobalCornerDataset(
         active_split_dir / "test.jsonl",
@@ -1575,7 +1831,12 @@ def train_global_corner_model(
         teacher_target_mode=teacher_target_mode,
         teacher_candidate_sources=teacher_candidate_sources,
         teacher_opencv_score_min=teacher_opencv_score_min,
+        teacher_opencv_agreement_corner_max=teacher_opencv_agreement_corner_max,
+        teacher_opencv_agreement_sample_max=teacher_opencv_agreement_sample_max,
+        teacher_opencv_agreement_penalty_scale=teacher_opencv_agreement_penalty_scale,
         teacher_activation_min_disagreement=teacher_activation_min_disagreement,
+        teacher_failure_layer_rewrite_min_gain=teacher_failure_layer_rewrite_min_gain,
+        teacher_failure_layer_disable_hard_both_fail=teacher_failure_layer_disable_hard_both_fail,
     )
     train_loader_kwargs: dict[str, Any] = {"batch_size": batch_size, "num_workers": 0}
     use_weighted_sampler = (
@@ -1624,7 +1885,7 @@ def train_global_corner_model(
         initialize_global_model_from_checkpoint(model, checkpoint)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     corner_weight_tensor = torch.tensor(corner_weights, dtype=torch.float32, device=device)
-    best_score = (math.inf, math.inf, math.inf, math.inf)
+    best_score = (math.inf,)
     best_epoch = 0
     best_metrics: dict[str, float] | None = None
     best_state: dict[str, torch.Tensor] | None = None
@@ -1711,7 +1972,7 @@ def train_global_corner_model(
         val = _evaluate(model, test_loader, device)
         row = {"epoch": epoch, "train_loss": float(np.mean(train_losses)) if train_losses else 0.0, **val}
         history.append(row)
-        epoch_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        epoch_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         if save_epoch_checkpoints:
             _save_checkpoint(
                 checkpoint_dir / f"epoch_{epoch:03d}.pt",
@@ -1746,7 +2007,12 @@ def train_global_corner_model(
                 teacher_target_mode=teacher_target_mode,
                 teacher_candidate_sources=teacher_candidate_sources,
                 teacher_opencv_score_min=teacher_opencv_score_min,
+                teacher_opencv_agreement_corner_max=teacher_opencv_agreement_corner_max,
+                teacher_opencv_agreement_sample_max=teacher_opencv_agreement_sample_max,
+                teacher_opencv_agreement_penalty_scale=teacher_opencv_agreement_penalty_scale,
                 teacher_activation_min_disagreement=teacher_activation_min_disagreement,
+                teacher_failure_layer_rewrite_min_gain=teacher_failure_layer_rewrite_min_gain,
+                teacher_failure_layer_disable_hard_both_fail=teacher_failure_layer_disable_hard_both_fail,
                 max_corner_weight=max_corner_weight,
                 edge_weight=edge_weight,
                 edge_line_weight=edge_line_weight,
@@ -1758,12 +2024,7 @@ def train_global_corner_model(
                 input_channels=input_channels,
                 feature_mode=feature_mode,
             )
-        val_score = (
-            float(val["screen_relative_error_mean"]),
-            float(val["max_corner_error_mean"]),
-            float(val["perspective_tilt_error_mean"]),
-            float(val["point_error_mean"]),
-        )
+        val_score = checkpoint_selection_key(val)
         if val_score < best_score:
             best_score = val_score
             best_epoch = epoch
@@ -1807,7 +2068,12 @@ def train_global_corner_model(
         teacher_target_mode=teacher_target_mode,
         teacher_candidate_sources=teacher_candidate_sources,
         teacher_opencv_score_min=teacher_opencv_score_min,
+        teacher_opencv_agreement_corner_max=teacher_opencv_agreement_corner_max,
+        teacher_opencv_agreement_sample_max=teacher_opencv_agreement_sample_max,
+        teacher_opencv_agreement_penalty_scale=teacher_opencv_agreement_penalty_scale,
         teacher_activation_min_disagreement=teacher_activation_min_disagreement,
+        teacher_failure_layer_rewrite_min_gain=teacher_failure_layer_rewrite_min_gain,
+        teacher_failure_layer_disable_hard_both_fail=teacher_failure_layer_disable_hard_both_fail,
         max_corner_weight=max_corner_weight,
         edge_weight=edge_weight,
         edge_line_weight=edge_line_weight,
@@ -1877,7 +2143,12 @@ def main() -> int:
         help="Comma-separated candidate sources for teacher target: teacher,r3,v28,roi,opencv",
     )
     parser.add_argument("--teacher-opencv-score-min", type=float)
+    parser.add_argument("--teacher-opencv-agreement-corner-max", type=float)
+    parser.add_argument("--teacher-opencv-agreement-sample-max", type=float)
+    parser.add_argument("--teacher-opencv-agreement-penalty-scale", type=float, default=0.0)
     parser.add_argument("--teacher-activation-min-disagreement", type=float)
+    parser.add_argument("--teacher-failure-layer-rewrite-min-gain", type=float, default=0.0)
+    parser.add_argument("--teacher-failure-layer-disable-hard-both-fail", action="store_true")
     parser.add_argument("--max-corner-weight", type=float, default=1.15)
     parser.add_argument("--edge-weight", type=float, default=0.35)
     parser.add_argument("--edge-line-weight", type=float, default=0.9)
@@ -1946,11 +2217,24 @@ def main() -> int:
         teacher_target_mode=str(args.teacher_target_mode),
         teacher_candidate_sources=teacher_candidate_sources,
         teacher_opencv_score_min=float(args.teacher_opencv_score_min) if args.teacher_opencv_score_min is not None else None,
+        teacher_opencv_agreement_corner_max=(
+            float(args.teacher_opencv_agreement_corner_max)
+            if args.teacher_opencv_agreement_corner_max is not None
+            else None
+        ),
+        teacher_opencv_agreement_sample_max=(
+            float(args.teacher_opencv_agreement_sample_max)
+            if args.teacher_opencv_agreement_sample_max is not None
+            else None
+        ),
+        teacher_opencv_agreement_penalty_scale=float(args.teacher_opencv_agreement_penalty_scale),
         teacher_activation_min_disagreement=(
             float(args.teacher_activation_min_disagreement)
             if args.teacher_activation_min_disagreement is not None
             else None
         ),
+        teacher_failure_layer_rewrite_min_gain=float(args.teacher_failure_layer_rewrite_min_gain),
+        teacher_failure_layer_disable_hard_both_fail=bool(args.teacher_failure_layer_disable_hard_both_fail),
         max_corner_weight=float(args.max_corner_weight),
         edge_weight=float(args.edge_weight),
         edge_line_weight=float(args.edge_line_weight),

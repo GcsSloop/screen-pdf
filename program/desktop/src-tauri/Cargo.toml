@@ -1,6 +1,6 @@
 [package]
 name = "screen-pdf"
-version = "0.2.8"
+version = "0.2.28"
 edition = "2021"
 
 [lib]

@@ -1,5 +1,12 @@
 # Distillation Run Convention
 
+## 2026-10-17 单文件补充（当前优先）
+
+新主线为 `screen_corner_single/round_xxx`，不覆盖旧蒸馏轮次。最终交付一个 `screen_corner_single.pt`（TorchScript），包含粗定位、局部采样、精修全部参数与计算。新的 manifest 使用 `architecture=screen_corner_single_v1`，`runtime_files` 只列这一个权重文件；`runtime_digest` 基于该文件摘要计算。元数据可记录初始化来源，但不作为运行依赖。对外正式发布编号继续使用 `model-*`，候选不伪造正式发布编号。
+
+唯一准确率和选优规则为 `point_le_0_01_ratio`；旧三阶段约定和多指标门槛仅用于历史溯源。下文记载旧发布兼容行为，当前单体候选未自动晋升。
+
+
 这份文档定义统一蒸馏模型的演进目录结构。
 
 目标很明确：

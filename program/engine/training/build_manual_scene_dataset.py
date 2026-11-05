@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from project_file import resolve_image_path
+
 import argparse
 import json
 import os
@@ -93,11 +95,16 @@ def build_manual_scene_dataset(
     project_payload = json.loads(project_file.read_text(encoding="utf-8"))
     project_root = project_file.parent
     project_slug = _slugify_project(1)
-    project_name = str(project_payload.get("name") or project_root.name)
+    project_name = project_root.name
     pages = list(project_payload.get("pages") or [])
 
     raw_alias = repo_root / "data" / "raw" / dataset_slug
     _create_or_refresh_symlink(raw_alias, project_root)
+
+    for page in pages:
+        image = resolve_image_path(project_file, page, project_payload)
+        if image is not None:
+            page["path"] = str(image)
 
     page_rows = [_annotation_row(dataset_slug, project_slug, project_name, page) for page in pages]
     supervision_pages = [row for row in page_rows if row.get("manual_quad")]

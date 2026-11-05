@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_file import project_files
+
 import argparse
 import json
 from collections import Counter
@@ -40,9 +42,14 @@ _DEFAULT_METRIC_ROW = {
 }
 
 
+def _error_value(metrics: dict[str, float], key: str) -> float:
+    value = metrics.get(key)
+    return 1.0 if value is None else float(value)
+
+
 def _passes_strict(metrics: dict[str, float], *, point_threshold: float, max_corner_threshold: float) -> bool:
-    return float(metrics.get("point_error", 1.0) or 1.0) <= float(point_threshold) and float(
-        metrics.get("max_corner_error", 1.0) or 1.0
+    return _error_value(metrics, "point_error") <= float(point_threshold) and _error_value(
+        metrics, "max_corner_error"
     ) <= float(max_corner_threshold)
 
 
@@ -53,8 +60,8 @@ def _metric_row(metrics: dict[str, float]) -> dict[str, float]:
 
 
 def _oracle_rank_key(metrics: dict[str, float]) -> tuple[int, int, float, float]:
-    point_error = float(metrics.get("point_error", 1.0) or 1.0)
-    max_corner_error = float(metrics.get("max_corner_error", 1.0) or 1.0)
+    point_error = _error_value(metrics, "point_error")
+    max_corner_error = _error_value(metrics, "max_corner_error")
     return (
         int(max_corner_error <= STRICT_MAX_CORNER_THRESHOLD),
         int(point_error <= STRICT_POINT_THRESHOLD),
@@ -130,13 +137,13 @@ def summarize_diagnostic_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _iter_manual_pages(dataset_root: Path) -> list[dict[str, Any]]:
     pages: list[dict[str, Any]] = []
-    for project_path in sorted(dataset_root.rglob("screen-pdf-project.json")):
+    for project_path in project_files(dataset_root):
         data = json.loads(project_path.read_text(encoding="utf-8"))
         for page in data.get("pages", []):
             manual_quad, _ = resolve_supervision_quad(page)
             if not manual_quad:
                 continue
-            image_path = _resolve_image_path(project_path, page)
+            image_path = _resolve_image_path(project_path, page, data)
             if image_path is None:
                 continue
             pages.append(

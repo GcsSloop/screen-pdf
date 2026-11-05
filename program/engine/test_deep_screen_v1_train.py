@@ -152,7 +152,7 @@ class DeepScreenV1TrainTests(unittest.TestCase):
         self.assertEqual(comparison["decision"], "stop")
         self.assertIn("strict-point", comparison["decision_reason"])
 
-    def test_round_comparison_rejects_stop_when_latency_gate_is_missed(self) -> None:
+    def test_round_comparison_uses_only_point_accuracy_regardless_of_latency(self) -> None:
         comparison = _build_round_comparison(
             {
                 "point_error_mean": 0.011,
@@ -163,8 +163,8 @@ class DeepScreenV1TrainTests(unittest.TestCase):
             {"point_error_mean": 0.007, "point_le_0_01_ratio": 0.8882},
         )
 
-        self.assertEqual(comparison["decision"], "continue")
-        self.assertIn("latency", comparison["decision_reason"])
+        self.assertEqual(comparison["decision"], "stop")
+        self.assertIn("strict-point", comparison["decision_reason"])
 
     def test_select_training_device_avoids_mps_for_grid_sample_backward(self) -> None:
         with mock.patch("deep_screen_v1_train.torch.cuda.is_available", return_value=False), mock.patch(
@@ -175,53 +175,16 @@ class DeepScreenV1TrainTests(unittest.TestCase):
 
         self.assertEqual(device.type, "cpu")
 
-    def test_checkpoint_selection_can_prioritize_point_error_over_loss(self) -> None:
-        current_best = {"loss_mean": 0.0014, "point_error_mean": 0.0259, "point_le_0_03_ratio": 0.8039, "point_le_0_02_ratio": 0.1765}
-        candidate = {"loss_mean": 0.0022, "point_error_mean": 0.0238, "point_le_0_03_ratio": 0.8026, "point_le_0_02_ratio": 0.4211}
+    def test_checkpoint_selection_rejects_retired_accuracy_objectives(self) -> None:
+        for metric in ["point_error_mean", "point_le_0_02_ratio", "max_corner_le_0_03_ratio", "loss_mean"]:
+            with self.subTest(metric=metric), self.assertRaisesRegex(ValueError, "Only point_le_0_01_ratio"):
+                _is_better_checkpoint({"point_le_0_01_ratio": .8}, None, selection_metric=metric)
 
-        is_better = _is_better_checkpoint(candidate, current_best, selection_metric="point_error_mean")
+    def test_checkpoint_selection_defaults_to_single_point_accuracy(self) -> None:
+        self.assertTrue(_is_better_checkpoint({"point_le_0_01_ratio": .8}, {"point_le_0_01_ratio": .7}))
+        self.assertFalse(_is_better_checkpoint({"point_le_0_01_ratio": .8}, {"point_le_0_01_ratio": .8}))
 
-        self.assertTrue(is_better)
-
-    def test_checkpoint_selection_uses_hit_rate_tie_breakers(self) -> None:
-        current_best = {"loss_mean": 0.0018, "point_error_mean": 0.0235, "point_le_0_03_ratio": 0.8618, "point_le_0_02_ratio": 0.3882}
-        candidate = {"loss_mean": 0.0019, "point_error_mean": 0.0235, "point_le_0_03_ratio": 0.8618, "point_le_0_02_ratio": 0.4079}
-
-        is_better = _is_better_checkpoint(candidate, current_best, selection_metric="point_error_mean")
-
-        self.assertTrue(is_better)
-
-    def test_checkpoint_selection_can_prioritize_point_le_0_02_ratio(self) -> None:
-        current_best = {"loss_mean": 0.0016, "point_error_mean": 0.0223, "point_le_0_03_ratio": 0.9050, "point_le_0_02_ratio": 0.4013}
-        candidate = {"loss_mean": 0.0019, "point_error_mean": 0.0224, "point_le_0_03_ratio": 0.9010, "point_le_0_02_ratio": 0.4342}
-
-        is_better = _is_better_checkpoint(candidate, current_best, selection_metric="point_le_0_02_ratio")
-
-        self.assertTrue(is_better)
-
-    def test_checkpoint_selection_can_prioritize_max_corner_le_0_03_ratio(self) -> None:
-        current_best = {
-            "loss_mean": 0.0014,
-            "point_error_mean": 0.0212,
-            "point_le_0_03_ratio": 0.9520,
-            "point_le_0_02_ratio": 0.4710,
-            "point_le_0_01_ratio": 0.4020,
-            "max_corner_le_0_03_ratio": 0.5110,
-        }
-        candidate = {
-            "loss_mean": 0.0019,
-            "point_error_mean": 0.0218,
-            "point_le_0_03_ratio": 0.9470,
-            "point_le_0_02_ratio": 0.4620,
-            "point_le_0_01_ratio": 0.4180,
-            "max_corner_le_0_03_ratio": 0.6030,
-        }
-
-        is_better = _is_better_checkpoint(candidate, current_best, selection_metric="max_corner_le_0_03_ratio")
-
-        self.assertTrue(is_better)
-
-    def test_checkpoint_selection_rejects_candidates_above_latency_gate(self) -> None:
+    def test_point_only_selection_does_not_use_latency_as_a_second_objective(self) -> None:
         current_best = {
             "loss_mean": 0.0032,
             "point_error_mean": 0.0245,
@@ -239,7 +202,7 @@ class DeepScreenV1TrainTests(unittest.TestCase):
 
         is_better = _is_better_checkpoint(candidate, current_best, selection_metric="point_le_0_01_ratio")
 
-        self.assertFalse(is_better)
+        self.assertTrue(is_better)
 
     def test_checkpoint_selection_prioritizes_point_le_0_01_ratio_when_latency_is_valid(self) -> None:
         current_best = {
@@ -261,7 +224,7 @@ class DeepScreenV1TrainTests(unittest.TestCase):
 
         self.assertTrue(is_better)
 
-    def test_checkpoint_selection_uses_point_error_before_latency_when_strict_point_ties(self) -> None:
+    def test_checkpoint_selection_keeps_previous_checkpoint_when_strict_point_ties(self) -> None:
         current_best = {
             "loss_mean": 0.0030,
             "point_error_mean": 0.0278,
@@ -283,7 +246,7 @@ class DeepScreenV1TrainTests(unittest.TestCase):
 
         is_better = _is_better_checkpoint(candidate, current_best, selection_metric="point_le_0_01_ratio")
 
-        self.assertTrue(is_better)
+        self.assertFalse(is_better)
 
     def test_scene_target_from_tags_encodes_known_scene_labels(self) -> None:
         target = _scene_target_from_tags(["near_color_background", "bright_screen", "border_contact_scene"])

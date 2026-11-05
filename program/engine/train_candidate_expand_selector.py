@@ -20,6 +20,8 @@ from two_stage_corner_pipeline import (
     LocalCornerMoEPredictor,
     RoiCornerPredictor,
     _attach_candidate_selector_features,
+    _build_external_candidate,
+    _build_roi_from_quad,
     _run_two_stage_candidate,
 )
 
@@ -33,6 +35,11 @@ class SelectorTrainingRow:
     page_id: str
     project_name: str
     baseline_index: int
+    candidate_sources: list[str] | None = None
+    failure_layer_category: str | None = None
+    failure_layer_runtime_gain: float | None = None
+    failure_layer_opencv_gain: float | None = None
+    failure_layer_union_gain: float | None = None
 
 
 def _load_rows(split_dir: Path, split: str) -> list[dict[str, Any]]:
@@ -140,6 +147,31 @@ def _build_project_sample_weights(
     return {project_name: float(weight / row_mean) for project_name, weight in raw_weights.items()}
 
 
+def _row_training_weight(
+    row: SelectorTrainingRow,
+    *,
+    project_weight: float,
+    switch_label_boost: float,
+    external_label_boost: float,
+    runtime_recoverable_boost: float,
+) -> float:
+    weight = float(project_weight)
+    if int(row.label_index) != int(row.baseline_index):
+        weight *= float(switch_label_boost)
+    candidate_sources = list(row.candidate_sources or [])
+    chosen_source = ""
+    if 0 <= int(row.label_index) < len(candidate_sources):
+        chosen_source = str(candidate_sources[row.label_index]).strip().lower()
+    failure_layer = str(row.failure_layer_category or "").strip().lower()
+    if chosen_source not in {"", "runtime", "model", "teacher"}:
+        if failure_layer == "opencv_recoverable":
+            weight *= float(external_label_boost)
+    elif chosen_source in {"runtime", "model", "teacher"}:
+        if failure_layer == "runtime_candidate_recoverable":
+            weight *= float(runtime_recoverable_boost)
+    return weight
+
+
 def _normalize_quad(quad: list[list[float]] | np.ndarray, width: int, height: int) -> np.ndarray:
     arr = order_points(np.array(quad, dtype=np.float32))
     out = arr.copy()
@@ -171,7 +203,6 @@ def build_selector_training_rows(
         if image is None:
             continue
         coarse_quad = order_points(np.array(global_predictor.predict_image(image), dtype=np.float32))
-        manual_quad = _normalize_quad(row["manual_quad"], image.shape[1], image.shape[0])
         candidate_items: list[dict[str, Any]] = []
         candidate_errors: list[float] = []
         candidate_metrics: list[dict[str, float]] = []
@@ -185,11 +216,28 @@ def build_selector_training_rows(
                 local_predictor=local_predictor,
                 expand_ratio=float(ratio),
             )
-            final_quad_norm = _normalize_quad(candidate["final_quad"], image.shape[1], image.shape[0])
-            metrics = quad_geometry_metrics(manual_quad, final_quad_norm)
+            metrics = quad_geometry_metrics(row["manual_quad"], np.asarray(candidate["final_quad"]))
             candidate_errors.append(float(metrics["point_error"]))
             candidate_metrics.append({key: float(value) for key, value in metrics.items()})
             candidate_items.append(candidate)
+        opencv_best_quad = row.get("opencv_best_quad")
+        if opencv_best_quad:
+            opencv_candidate = _build_external_candidate(
+                {
+                    "quad": opencv_best_quad,
+                    "score": row.get("opencv_best_score", 0.0),
+                    "candidate_score": row.get("opencv_best_score", 0.0),
+                    "source": "opencv",
+                    "expand_ratio": -1.0,
+                    "roi": _build_roi_from_quad(image.shape, np.array(opencv_best_quad, dtype=np.float32), expand_ratio=0.02),
+                },
+                image_shape=image.shape,
+            )
+            if opencv_candidate is not None:
+                metrics = quad_geometry_metrics(row["manual_quad"], np.asarray(opencv_candidate["final_quad"]))
+                candidate_errors.append(float(metrics["point_error"]))
+                candidate_metrics.append({key: float(value) for key, value in metrics.items()})
+                candidate_items.append(opencv_candidate)
         if not candidate_items:
             continue
         _attach_candidate_selector_features(
@@ -222,6 +270,27 @@ def build_selector_training_rows(
                 page_id=str(row.get("page_id") or image_path.stem),
                 project_name=_infer_project_name(row, image_path),
                 baseline_index=baseline_index,
+                candidate_sources=[str(item.get("source", "runtime") or "runtime") for item in candidate_items],
+                failure_layer_category=(
+                    str(row.get("failure_layer_category")).strip()
+                    if row.get("failure_layer_category") is not None
+                    else None
+                ),
+                failure_layer_runtime_gain=(
+                    float(row.get("failure_layer_runtime_gain"))
+                    if row.get("failure_layer_runtime_gain") is not None
+                    else None
+                ),
+                failure_layer_opencv_gain=(
+                    float(row.get("failure_layer_opencv_gain"))
+                    if row.get("failure_layer_opencv_gain") is not None
+                    else None
+                ),
+                failure_layer_union_gain=(
+                    float(row.get("failure_layer_union_gain"))
+                    if row.get("failure_layer_union_gain") is not None
+                    else None
+                ),
             )
         )
     return training_rows
@@ -237,6 +306,9 @@ def train_linear_selector(
     switch_margin: float = 0.0,
     objective_mode: str = "cross_entropy",
     pairwise_weight: float = 0.5,
+    switch_label_boost: float = 1.0,
+    external_label_boost: float = 1.0,
+    runtime_recoverable_boost: float = 1.0,
 ) -> dict[str, Any]:
     if not rows:
         raise ValueError("no selector training rows")
@@ -258,7 +330,13 @@ def train_linear_selector(
         for row in rows:
             features = torch.from_numpy(((row.features - feature_mean) / feature_std).astype(np.float32))
             logits = features @ weight + bias
-            sample_weight = float(project_weights.get(row.project_name, 1.0))
+            sample_weight = _row_training_weight(
+                row,
+                project_weight=float(project_weights.get(row.project_name, 1.0)),
+                switch_label_boost=float(switch_label_boost),
+                external_label_boost=float(external_label_boost),
+                runtime_recoverable_boost=float(runtime_recoverable_boost),
+            )
             target = torch.tensor([row.label_index], dtype=torch.long)
             ce_loss = torch.nn.functional.cross_entropy(logits.unsqueeze(0), target)
             pairwise_losses: list[torch.Tensor] = []
@@ -328,6 +406,9 @@ def train_linear_selector(
         "switch_margin": float(switch_margin),
         "objective_mode": str(objective_mode),
         "pairwise_weight": float(pairwise_weight),
+        "switch_label_boost": float(switch_label_boost),
+        "external_label_boost": float(external_label_boost),
+        "runtime_recoverable_boost": float(runtime_recoverable_boost),
         "train_pairwise_preference_accuracy": float(pairwise_correct / max(pairwise_total, 1)),
         "project_counts": {project_name: int(count) for project_name, count in sorted(project_counts.items())},
         "project_weights": {project_name: round(float(weight), 6) for project_name, weight in sorted(project_weights.items())},
@@ -353,6 +434,9 @@ def main() -> int:
     parser.add_argument("--preserve-max-margin", type=float, default=0.0025)
     parser.add_argument("--objective-mode", choices=("cross_entropy", "pairwise", "hybrid"), default="cross_entropy")
     parser.add_argument("--pairwise-weight", type=float, default=0.5)
+    parser.add_argument("--switch-label-boost", type=float, default=1.0)
+    parser.add_argument("--external-label-boost", type=float, default=1.0)
+    parser.add_argument("--runtime-recoverable-boost", type=float, default=1.0)
     args = parser.parse_args()
 
     candidate_expand_ratios = [float(part.strip()) for part in str(args.candidate_expand_ratios).split(",") if part.strip()]
@@ -376,6 +460,9 @@ def main() -> int:
         switch_margin=float(args.switch_margin),
         objective_mode=str(args.objective_mode),
         pairwise_weight=float(args.pairwise_weight),
+        switch_label_boost=float(args.switch_label_boost),
+        external_label_boost=float(args.external_label_boost),
+        runtime_recoverable_boost=float(args.runtime_recoverable_boost),
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

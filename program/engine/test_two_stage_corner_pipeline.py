@@ -14,9 +14,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from two_stage_corner_pipeline import (
+    CANDIDATE_SELECTOR_FEATURE_NAMES,
     GlobalCornerPredictor,
     LinearCandidateExpandSelector,
     LocalCornerMoEPredictor,
+    _attach_candidate_selector_features,
     apply_roi_prediction,
     build_refine_request,
     export_refine_dataset_from_global_predictions,
@@ -860,6 +862,69 @@ class TwoStageCornerPipelineTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 2)
         self.assertEqual(result["final_quad"], [[58.0, 33.0], [262.0, 33.0], [262.0, 147.0], [58.0, 147.0]])
 
+    def test_predict_two_stage_allows_selector_to_choose_external_opencv_candidate(self) -> None:
+        test_case = self
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.zeros((180, 320, 3), dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+
+            coarse_quad = np.array([[50, 30], [270, 35], [260, 150], [55, 145]], dtype=np.float32)
+            baseline_quad = np.array([[60.0, 35.0], [260.0, 35.0], [260.0, 145.0], [60.0, 145.0]], dtype=np.float32)
+            opencv_quad = [[54.0, 31.0], [266.0, 31.0], [266.0, 149.0], [54.0, 149.0]]
+
+            class FakeLocalPredictor:
+                def predict_with_details(self, path: Path, predicted_quad: np.ndarray, image: np.ndarray | None = None) -> dict[str, object]:
+                    del image, predicted_quad
+                    test_case.assertEqual(path, image_path)
+                    return {
+                        "quad": baseline_quad,
+                        "corner_details": [
+                            {"trust": 0.56, "patch_size": 100.0, "displacement": 8.0},
+                            {"trust": 0.55, "patch_size": 100.0, "displacement": 7.0},
+                            {"trust": 0.57, "patch_size": 100.0, "displacement": 8.0},
+                            {"trust": 0.56, "patch_size": 100.0, "displacement": 9.0},
+                        ],
+                    }
+
+                def __call__(self, path: Path, quad: np.ndarray, image: np.ndarray | None = None) -> np.ndarray:
+                    return self.predict_with_details(path, quad, image=image)["quad"]
+
+            class FakeSelector:
+                def select_candidate(self, candidates: list[dict[str, object]], *, baseline_expand_ratio: float) -> dict[str, object] | None:
+                    test_case.assertEqual(round(float(baseline_expand_ratio), 2), 0.08)
+                    return next(item for item in candidates if item.get("source") == "opencv")
+
+            def fake_global_predictor(path: Path) -> np.ndarray:
+                self.assertEqual(path, image_path)
+                return coarse_quad
+
+            def fake_roi_predictor(request: dict[str, object]) -> np.ndarray:
+                return np.array([[0.16, 0.12], [0.86, 0.12], [0.86, 0.88], [0.16, 0.88]], dtype=np.float32)
+
+            result = predict_two_stage(
+                image_path=image_path,
+                global_predictor=fake_global_predictor,
+                roi_predictor=fake_roi_predictor,
+                local_predictor=FakeLocalPredictor(),
+                expand_ratio=0.08,
+                candidate_expand_ratios=[0.08],
+                candidate_selector=FakeSelector(),
+                external_candidates=[
+                    {
+                        "quad": opencv_quad,
+                        "source": "opencv",
+                        "candidate_score": 0.72,
+                        "expand_ratio": -1.0,
+                    }
+                ],
+            )
+
+        self.assertEqual(result["selected_expand_ratio"], -1.0)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["final_quad"], opencv_quad)
+
     def test_linear_candidate_expand_selector_keeps_baseline_without_clear_margin(self) -> None:
         selector = LinearCandidateExpandSelector(
             weights=[1.0],
@@ -880,6 +945,86 @@ class TwoStageCornerPipelineTests(unittest.TestCase):
 
         self.assertIsNotNone(chosen)
         self.assertEqual(float(chosen["expand_ratio"]), 0.08)
+
+    def test_linear_candidate_expand_selector_accepts_longer_feature_vectors_for_backward_compatibility(self) -> None:
+        selector = LinearCandidateExpandSelector(
+            weights=[1.0, 0.5],
+            bias=0.0,
+            feature_mean=[0.0, 0.0],
+            feature_std=[1.0, 1.0],
+            feature_names=["a", "b"],
+        )
+
+        score = selector.score_features([1.0, 2.0, 99.0])
+
+        self.assertAlmostEqual(score, 2.0)
+
+    def test_attach_candidate_selector_features_includes_final_quad_geometry_features(self) -> None:
+        coarse_quad = np.array([[40.0, 20.0], [280.0, 20.0], [280.0, 160.0], [40.0, 160.0]], dtype=np.float32)
+        candidates = [
+            {
+                "expand_ratio": 0.08,
+                "candidate_score": 0.52,
+                "source": "runtime",
+                "roi": {"x": 35, "y": 15, "width": 250, "height": 150},
+                "final_quad": [[70.0, 45.0], [250.0, 45.0], [250.0, 135.0], [70.0, 135.0]],
+                "local_details": {
+                    "corner_details": [
+                        {"trust": 0.55, "patch_size": 100.0, "displacement": 8.0},
+                        {"trust": 0.54, "patch_size": 100.0, "displacement": 7.0},
+                        {"trust": 0.56, "patch_size": 100.0, "displacement": 8.0},
+                        {"trust": 0.55, "patch_size": 100.0, "displacement": 9.0},
+                    ]
+                },
+            },
+            {
+                "expand_ratio": -1.0,
+                "candidate_score": 0.41,
+                "source": "opencv",
+                "roi": {"x": 25, "y": 8, "width": 270, "height": 170},
+                "final_quad": [[46.0, 24.0], [286.0, 24.0], [286.0, 156.0], [46.0, 156.0]],
+                "local_details": None,
+            },
+        ]
+
+        _attach_candidate_selector_features(
+            candidates,
+            coarse_quad,
+            (180, 320, 3),
+            baseline_expand_ratio=0.08,
+        )
+
+        baseline_features = dict(zip(CANDIDATE_SELECTOR_FEATURE_NAMES, candidates[0]["selector_features"], strict=True))
+        external_features = dict(zip(CANDIDATE_SELECTOR_FEATURE_NAMES, candidates[1]["selector_features"], strict=True))
+
+        self.assertIn("quad_area_frac", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("quad_area_delta_vs_baseline", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("quad_bbox_width_frac", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("quad_bbox_height_frac", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("runtime_candidate_score", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("external_candidate_score", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("has_local_details", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertIn("has_local_details_delta_vs_baseline", CANDIDATE_SELECTOR_FEATURE_NAMES)
+        self.assertAlmostEqual(float(baseline_features["quad_area_delta_vs_baseline"]), 0.0, places=6)
+        self.assertAlmostEqual(float(baseline_features["runtime_candidate_score"]), 0.52, places=6)
+        self.assertAlmostEqual(float(baseline_features["external_candidate_score"]), 0.0, places=6)
+        self.assertEqual(float(baseline_features["has_local_details"]), 1.0)
+        self.assertAlmostEqual(float(external_features["runtime_candidate_score"]), 0.0, places=6)
+        self.assertAlmostEqual(float(external_features["external_candidate_score"]), 0.41, places=6)
+        self.assertEqual(float(external_features["has_local_details"]), 0.0)
+        self.assertGreater(float(external_features["quad_area_frac"]), float(baseline_features["quad_area_frac"]))
+        self.assertGreater(
+            float(external_features["quad_bbox_width_frac"]),
+            float(baseline_features["quad_bbox_width_frac"]),
+        )
+        self.assertGreater(
+            float(external_features["quad_bbox_height_frac"]),
+            float(baseline_features["quad_bbox_height_frac"]),
+        )
+        self.assertGreater(float(external_features["quad_area_delta_vs_baseline"]), 0.0)
+        self.assertLess(float(external_features["runtime_candidate_score_delta_vs_baseline"]), 0.0)
+        self.assertGreater(float(external_features["external_candidate_score_delta_vs_baseline"]), 0.0)
+        self.assertLess(float(external_features["has_local_details_delta_vs_baseline"]), 0.0)
 
 
 if __name__ == "__main__":

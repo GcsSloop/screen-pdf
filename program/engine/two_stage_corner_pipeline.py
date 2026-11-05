@@ -36,7 +36,15 @@ CANDIDATE_SELECTOR_FEATURE_NAMES = [
     "roi_width_frac",
     "roi_height_frac",
     "roi_area_frac",
+    "quad_bbox_width_frac",
+    "quad_bbox_height_frac",
+    "quad_area_frac",
+    "runtime_candidate_score",
+    "external_candidate_score",
+    "has_local_details",
     "coarse_drift",
+    "source_is_external",
+    "source_is_opencv",
     "is_baseline",
     "candidate_score_delta_vs_baseline",
     "mean_trust_delta_vs_baseline",
@@ -44,7 +52,15 @@ CANDIDATE_SELECTOR_FEATURE_NAMES = [
     "mean_displacement_delta_vs_baseline",
     "max_displacement_delta_vs_baseline",
     "roi_area_delta_vs_baseline",
+    "quad_bbox_width_delta_vs_baseline",
+    "quad_bbox_height_delta_vs_baseline",
+    "quad_area_delta_vs_baseline",
+    "runtime_candidate_score_delta_vs_baseline",
+    "external_candidate_score_delta_vs_baseline",
+    "has_local_details_delta_vs_baseline",
     "coarse_drift_delta_vs_baseline",
+    "source_is_external_delta_vs_baseline",
+    "source_is_opencv_delta_vs_baseline",
 ]
 
 
@@ -92,7 +108,10 @@ class LinearCandidateExpandSelector:
     def score_features(self, features: Sequence[float]) -> float:
         vector = np.array(list(features), dtype=np.float32)
         if vector.shape != self.weights.shape:
-            raise ValueError(f"feature shape mismatch: expected {self.weights.shape}, got {vector.shape}")
+            if vector.shape[0] > self.weights.shape[0]:
+                vector = vector[: self.weights.shape[0]]
+            else:
+                vector = np.pad(vector, (0, self.weights.shape[0] - vector.shape[0]), constant_values=0.0)
         normalized = (vector - self.feature_mean) / self.feature_std
         return float(np.dot(normalized, self.weights) + self.bias)
 
@@ -266,11 +285,20 @@ def _build_candidate_selector_features(candidate: dict[str, Any], coarse_quad: n
         final_source = coarse_quad
     final_quad = np.array(final_source, dtype=np.float32)
     final_quad = order_points(final_quad)
+    final_bbox = np.ptp(final_quad, axis=0)
+    quad_bbox_width_frac = float(final_bbox[0] / width)
+    quad_bbox_height_frac = float(final_bbox[1] / height)
+    quad_area_frac = float(abs(cv2.contourArea(final_quad)) / max(width * height, 1.0))
+    candidate_score = float(candidate.get("candidate_score", 0.0) or 0.0)
+    has_local_details = 1.0 if corner_details else 0.0
     coarse_quad = order_points(np.array(coarse_quad, dtype=np.float32))
     drift = float(normalized_point_error(final_quad / np.array([width, height], dtype=np.float32), coarse_quad / np.array([width, height], dtype=np.float32)))
+    source = str(candidate.get("source", "runtime") or "runtime").lower()
+    runtime_candidate_score = candidate_score if source in {"runtime", "model", "teacher"} else 0.0
+    external_candidate_score = candidate_score if source not in {"runtime", "model", "teacher"} else 0.0
     return [
         float(candidate.get("expand_ratio", 0.0) or 0.0),
-        float(candidate.get("candidate_score", 0.0) or 0.0),
+        candidate_score,
         float(np.mean(trust_values)) if trust_values else 0.0,
         float(np.min(trust_values)) if trust_values else 0.0,
         float(np.mean(displacement_norms)) if displacement_norms else 0.0,
@@ -278,7 +306,15 @@ def _build_candidate_selector_features(candidate: dict[str, Any], coarse_quad: n
         roi_width / width,
         roi_height / height,
         (roi_width * roi_height) / max(width * height, 1.0),
+        quad_bbox_width_frac,
+        quad_bbox_height_frac,
+        quad_area_frac,
+        runtime_candidate_score,
+        external_candidate_score,
+        has_local_details,
         drift,
+        0.0 if source in {"runtime", "model", "teacher"} else 1.0,
+        1.0 if source == "opencv" else 0.0,
     ]
 
 
@@ -314,7 +350,40 @@ def _attach_candidate_selector_features(
             raw[5] - baseline_features[5],
             raw[8] - baseline_features[8],
             raw[9] - baseline_features[9],
+            raw[10] - baseline_features[10],
+            raw[11] - baseline_features[11],
+            raw[12] - baseline_features[12],
+            raw[13] - baseline_features[13],
+            raw[14] - baseline_features[14],
+            raw[15] - baseline_features[15],
+            raw[16] - baseline_features[16],
+            raw[17] - baseline_features[17],
         ]
+
+
+def _build_external_candidate(
+    candidate: dict[str, Any],
+    *,
+    image_shape: Sequence[int],
+) -> dict[str, Any] | None:
+    final_source = candidate.get("quad")
+    if final_source is None:
+        final_source = candidate.get("final_quad")
+    if final_source is None:
+        return None
+    final_quad = order_points(np.array(final_source, dtype=np.float32))
+    roi = candidate.get("roi")
+    if not isinstance(roi, dict):
+        roi = _build_roi_from_quad(image_shape, final_quad, expand_ratio=0.02)
+    return {
+        "roi_quad": final_quad,
+        "final_quad": final_quad,
+        "roi": roi,
+        "expand_ratio": float(candidate.get("expand_ratio", -1.0) or -1.0),
+        "local_details": candidate.get("local_details"),
+        "candidate_score": float(candidate.get("candidate_score", candidate.get("score", 0.0)) or 0.0),
+        "source": str(candidate.get("source", "external") or "external"),
+    }
 
 
 def _should_use_candidate_expand_selection(
@@ -385,7 +454,9 @@ def predict_two_stage(
     candidate_baseline_gate: float = 0.45,
     candidate_min_score_gain: float = 0.03,
     candidate_selector: Any | None = None,
+    external_candidates: Sequence[dict[str, Any]] | None = None,
     image: np.ndarray | None = None,
+    return_diagnostics: bool = False,
 ) -> dict[str, Any]:
     resolved_page_id = page_id or image_path.stem
     if image is None:
@@ -413,7 +484,14 @@ def predict_two_stage(
         local_predictor=local_predictor,
         expand_ratio=float(expand_ratio),
     )
-    if len(expand_candidates) > 1 and local_predictor is not None and callable(getattr(local_predictor, "predict_with_details", None)):
+    total_candidate_count = len(expand_candidates)
+    candidates = [selected]
+    baseline_candidate = selected
+    if (
+        (len(expand_candidates) > 1 or bool(external_candidates))
+        and local_predictor is not None
+        and callable(getattr(local_predictor, "predict_with_details", None))
+    ):
         candidates = [
             _run_two_stage_candidate(
                 image_path=image_path,
@@ -426,6 +504,11 @@ def predict_two_stage(
             )
             for ratio in expand_candidates
         ]
+        for raw_candidate in external_candidates or ():
+            external_candidate = _build_external_candidate(raw_candidate, image_shape=image.shape)
+            if external_candidate is not None:
+                candidates.append(external_candidate)
+        total_candidate_count = len(candidates)
         _attach_candidate_selector_features(
             candidates,
             coarse_quad,
@@ -436,6 +519,7 @@ def predict_two_stage(
             (item for item in candidates if abs(float(item["expand_ratio"]) - float(expand_ratio)) <= 1e-9),
             candidates[0],
         )
+        baseline_candidate = baseline
         if candidate_selector is not None and callable(getattr(candidate_selector, "select_candidate", None)):
             chosen = candidate_selector.select_candidate(candidates, baseline_expand_ratio=float(expand_ratio))
             if isinstance(chosen, dict):
@@ -456,7 +540,7 @@ def predict_two_stage(
                 selected = best
             else:
                 selected = baseline
-    return {
+    result = {
         "page_id": resolved_page_id,
         "image_path": str(image_path),
         "coarse_quad": coarse_quad.tolist(),
@@ -464,8 +548,23 @@ def predict_two_stage(
         "final_quad": [[round(float(x), 4), round(float(y), 4)] for x, y in selected["final_quad"]],
         "roi": selected["roi"],
         "selected_expand_ratio": round(float(selected["expand_ratio"]), 4),
-        "candidate_count": len(expand_candidates),
+        "candidate_count": int(total_candidate_count),
     }
+    if return_diagnostics:
+        result["diagnostics"] = {
+            "baseline_roi_quad": np.asarray(baseline_candidate["roi_quad"]).tolist(),
+            "baseline_local_quad": np.asarray(baseline_candidate["final_quad"]).tolist(),
+            "candidates": [
+                {
+                    "expand_ratio": float(item["expand_ratio"]),
+                    "roi_quad": np.asarray(item["roi_quad"]).tolist(),
+                    "final_quad": np.asarray(item["final_quad"]).tolist(),
+                    "candidate_score": item.get("candidate_score"),
+                }
+                for item in candidates
+            ],
+        }
+    return result
 
 
 class GlobalCornerPredictor:

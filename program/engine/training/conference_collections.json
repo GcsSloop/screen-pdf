@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "source_root": "/Users/gcssloop/WorkSpace/AIGC/展会",
+  "classification_source": "2026/数据集场次分类.txt",
+  "collections": [
+    {"id":"202304-shanghai-display","directory":"202304 上海-大屏幕显示百家讲坛","name":"上海·大屏幕显示百家讲坛","kind":"conference"},
+    {"id":"202307-beijing-infocomm","directory":"202307 北京-Infocomm","name":"北京·InfoComm","kind":"conference"},
+    {"id":"202312-openatom","directory":"202312 开放原子开发者大会","name":"开放原子开发者大会","kind":"conference"},
+    {"id":"hangzhou-its-market","directory":"202503 杭州-第十五届智能交通市场年会","name":"杭州·第十五届智能交通市场年会","kind":"conference","note":"源目录前缀为 202503，资料页面日期为 2026-03；保留原名，不据此修改活动年份。"},
+    {"id":"20260319-smart-road-lighting","directory":"202603 中国智慧道路照明大会","project_prefix":"2026-03-19","name":"中国智慧道路照明大会·3 月 19 日","kind":"conference_session"},
+    {"id":"20260320-smart-road-lighting","directory":"202603 中国智慧道路照明大会","project_prefix":"2026-03-20","name":"中国智慧道路照明大会·3 月 20 日","kind":"conference_session"},
+    {"id":"202603-fuzhou-highway","directory":"202603 福州-第二十八届高速公路信息化大会","name":"福州·第二十八届高速公路信息化大会","kind":"conference"},
+    {"id":"202604-mall","directory":"202604 商场测试数据集","name":"商场拍屏专项测试","kind":"special_test"},
+    {"id":"202609-shanghai-metaverse","directory":"202609 上海-元宇宙产业嘉年华","name":"上海·元宇宙产业嘉年华","kind":"conference"},
+    {"id":"202610-hangzhou-tunnel","directory":"202610 杭州-隧道照明与安全论坛","name":"杭州·隧道照明与安全论坛","kind":"conference","target":"超宽 LED 屏内右侧 PPT；排除左侧固定信息区，保留条纹、计时叠层和人头遮挡。"},
+    {"id":"202610-zhuiguang","directory":"202610 追光卅载铸根基，AI赋能启新篇","name":"追光卅载·AI 赋能活动","kind":"conference"},
+    {"id":"202603-awe","directory":"202603-awe","name":"AWE 专项测试","kind":"special_test"},
+    {"id":"202603-yangzhou","directory":"202603-guochenghao-yangzhou","name":"扬州国城豪专项测试","kind":"special_test"}
+  ]
+}

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from dataset_benchmark import quad_geometry_metrics, summarize_geometry_metric_rows
+from dataset_benchmark import METRIC_CONTRACT, checkpoint_selection_key, normalized_quad_geometry_metrics, summarize_geometry_metric_rows
 
 
 def build_corner_heatmaps(
@@ -56,6 +56,7 @@ class CornerSampleDataset(Dataset):
         self.output_size = output_size
         self.augment = augment
         self.cache_images = cache_images
+        self._geometry_sizes: dict[str, tuple[int, int]] = {}
         lines = manifest_path.read_text(encoding="utf-8").splitlines()
         self.rows = [json.loads(line) for line in lines if line.strip()]
         self._cache: list[dict[str, np.ndarray] | None] | None = None
@@ -112,6 +113,7 @@ class CornerSampleDataset(Dataset):
         image = cv2.imread(str(image_path))
         if image is None:
             raise FileNotFoundError(image_path)
+        self._geometry_sizes[str(row["roi_path"])] = (image.shape[1], image.shape[0])
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = cv2.resize(image, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
         corners = np.array(row["corner_norm"], dtype=np.float32)
@@ -135,6 +137,17 @@ class CornerSampleDataset(Dataset):
             image = base["image"]
             corners = base["corners"]
             coarse = base["coarse"]
+        roi = row.get("roi")
+        if roi is not None:
+            geometry_size = (roi["width"], roi["height"])
+        else:
+            key = str(row["roi_path"])
+            if key not in self._geometry_sizes:
+                original = cv2.imread(str(self.dataset_root / key))
+                if original is None:
+                    raise FileNotFoundError(self.dataset_root / key)
+                self._geometry_sizes[key] = (original.shape[1], original.shape[0])
+            geometry_size = self._geometry_sizes[key]
         image, corners, coarse = self._maybe_augment(image, corners, coarse)
         image_f = image.astype(np.float32) / 255.0
         coarse_mask = _draw_polygon_mask(coarse, self.input_size)
@@ -142,6 +155,7 @@ class CornerSampleDataset(Dataset):
         heatmaps = build_corner_heatmaps(corners, output_size=self.output_size)
         return {
             "image": torch.from_numpy(features),
+            "image_size": torch.tensor(geometry_size, dtype=torch.float32),
             "heatmaps": torch.from_numpy(heatmaps),
             "corners": torch.from_numpy(corners),
         }
@@ -365,8 +379,8 @@ def evaluate_model(
             losses.extend(loss.detach().cpu().repeat(images.shape[0]).tolist())
             pred_np = pred.detach().cpu().numpy()
             corners_np = corners.detach().cpu().numpy()
-            for pred_row, target_row in zip(pred_np, corners_np, strict=True):
-                metric_rows.append(quad_geometry_metrics(target_row, pred_row))
+            for pred_row, target_row, size in zip(pred_np, corners_np, batch["image_size"].cpu().numpy(), strict=True):
+                metric_rows.append(normalized_quad_geometry_metrics(target_row, pred_row, size))
     if not metric_rows:
         return {
             "loss": 0.0,
@@ -375,6 +389,7 @@ def evaluate_model(
             "point_le_0_03": 0.0,
             "point_le_0_02": 0.0,
             "point_le_0_01": 0.0,
+            "quad_le_0_01": 0.0,
             "screen_relative_error_mean": 0.0,
             "max_corner_error_mean": 0.0,
             "perspective_tilt_error_mean": 0.0,
@@ -388,6 +403,7 @@ def evaluate_model(
         "point_le_0_03": float(summary["point_le_0_03_ratio"]),
         "point_le_0_02": float(summary["point_le_0_02_ratio"]),
         "point_le_0_01": float(summary["point_le_0_01_ratio"]),
+        "quad_le_0_01": float(summary["quad_le_0_01_ratio"]),
         "screen_relative_error_mean": float(summary["screen_relative_error_mean"]),
         "max_corner_error_mean": float(summary["max_corner_error_mean"]),
         "perspective_tilt_error_mean": float(summary["perspective_tilt_error_mean"]),
@@ -458,7 +474,7 @@ def train_corner_model(
     best_state: dict[str, torch.Tensor] | None = None
     best_metrics: dict[str, float] | None = None
     best_epoch = 0
-    best_score = (math.inf, math.inf, math.inf, math.inf)
+    best_score = (math.inf,)
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -482,17 +498,12 @@ def train_corner_model(
         val_metrics = evaluate_model(model, test_loader, device, head_mode=head_mode, decode_mode=decode_mode)
         row = {"epoch": epoch, "train_loss": train_loss, **val_metrics}
         history.append(row)
-        score = (
-            float(val_metrics["screen_relative_error_mean"]),
-            float(val_metrics["max_corner_error_mean"]),
-            float(val_metrics["perspective_tilt_error_mean"]),
-            float(val_metrics["point_error_mean"]),
-        )
+        score = checkpoint_selection_key(val_metrics)
         if score < best_score:
             best_score = score
             best_epoch = epoch
             best_metrics = dict(val_metrics)
-            best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
     if best_state is None or best_metrics is None:
         raise RuntimeError("training produced no checkpoint")
@@ -500,6 +511,7 @@ def train_corner_model(
     model_path = output_dir / "corner_heatmap_model.pt"
     torch.save(
         {
+            "metric_contract": METRIC_CONTRACT,
             "state_dict": best_state,
             "input_size": input_size,
             "output_size": output_size,

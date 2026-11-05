@@ -43,7 +43,7 @@ def load_failure_layer_index(path: Path | None) -> dict[tuple[str, str], dict[st
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows: list[dict[str, Any]] = []
-    for key in ("runtime_examples", "opencv_examples", "hard_examples"):
+    for key in ("runtime_examples", "selector_examples", "opencv_examples", "hard_examples"):
         rows.extend(payload.get(key) or [])
     index: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:

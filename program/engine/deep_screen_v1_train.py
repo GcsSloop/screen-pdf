@@ -19,7 +19,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from corner_train import build_corner_heatmaps, select_torch_device
-from dataset_benchmark import compute_scene_profile, quad_geometry_metrics, summarize_geometry_metric_rows
+from dataset_benchmark import METRIC_CONTRACT, compute_scene_profile, normalized_quad_geometry_metrics, quad_geometry_metrics, summarize_geometry_metric_rows
 from deep_screen_v1_model import DeepScreenV1Net, load_compatible_state_dict
 from local_corner_heatmap import build_corner_direction_target, build_corner_visibility_target
 from local_corner_refine import build_local_corner_patch_sample
@@ -465,17 +465,11 @@ def _recent_rounds_hit_plateau(
 
 
 def _decide_round_status(student_metrics: Mapping[str, Any], teacher_metrics: Mapping[str, Any]) -> tuple[str, str]:
-    student_point = float(student_metrics.get("point_error_mean", math.inf))
-    student_strict_point = float(student_metrics.get("point_le_0_01_ratio", 0.0))
-    student_infer = float(student_metrics.get("avg_page_infer_ms", math.inf))
-    if student_infer > MAX_ALLOWED_INFER_MS:
-        return "continue", "latency gate missed"
-    if student_strict_point >= STRICT_POINT_TARGET_RATIO:
+    # Accuracy status is determined only by the single-point metric.
+    student_hit = float(student_metrics.get("point_le_0_01_ratio", 0.0))
+    if student_hit >= STRICT_POINT_TARGET_RATIO:
         return "stop", "meets strict-point threshold"
-    teacher_point = float(teacher_metrics.get("point_error_mean", math.inf))
-    if student_point <= teacher_point * 3.0:
-        return "continue", "still above teacher quality target"
-    return "continue", "still far from target quality"
+    return "continue", "still far from target single-point accuracy"
 
 
 def _build_round_comparison(
@@ -483,19 +477,7 @@ def _build_round_comparison(
     teacher_metrics: Mapping[str, Any],
     r3_metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
-    comparison_keys = [
-        "point_error_mean",
-        "point_le_0_05_ratio",
-        "point_le_0_03_ratio",
-        "point_le_0_02_ratio",
-        "point_le_0_01_ratio",
-        "screen_relative_error_mean",
-        "max_corner_error_mean",
-        "max_corner_le_0_03_ratio",
-        "perspective_tilt_error_mean",
-        "quad_inset_ratio_mean",
-        "quad_inset_ratio_abs_mean",
-    ]
+    comparison_keys = ["point_le_0_01_ratio"]
     student = {key: student_metrics.get(key) for key in comparison_keys}
     teacher = {key: teacher_metrics.get(key) for key in comparison_keys}
     r3 = {key: r3_metrics.get(key) for key in comparison_keys}
@@ -676,6 +658,7 @@ class DeepScreenV1Dataset(Dataset):
         image_f = image.astype(np.float32) / 255.0
         return {
             "image": torch.from_numpy(np.transpose(image_f, (2, 0, 1))),
+            "image_size": torch.tensor([width, height], dtype=torch.float32),
             "manual_quad": torch.from_numpy(manual_quad),
             "teacher_quad": torch.from_numpy(teacher_quad),
             "r3_quad": torch.from_numpy(r3_quad),
@@ -735,36 +718,20 @@ def _checkpoint_metric_value(metrics: Mapping[str, Any], key: str, default: floa
 
 
 def _checkpoint_rank(metrics: Mapping[str, Any], selection_metric: str) -> tuple[float, ...]:
-    point_error = _checkpoint_metric_value(metrics, "point_error_mean", math.inf)
-    point_le_003 = _checkpoint_metric_value(metrics, "point_le_0_03_ratio", -math.inf)
-    point_le_002 = _checkpoint_metric_value(metrics, "point_le_0_02_ratio", -math.inf)
-    point_le_001 = _checkpoint_metric_value(metrics, "point_le_0_01_ratio", -math.inf)
-    max_corner_le_003 = _checkpoint_metric_value(metrics, "max_corner_le_0_03_ratio", -math.inf)
-    screen_error = _checkpoint_metric_value(metrics, "screen_relative_error_mean", math.inf)
-    loss_mean = _checkpoint_metric_value(metrics, "loss_mean", math.inf)
-    infer_ms = _checkpoint_metric_value(metrics, "avg_page_infer_ms", math.inf)
-    latency_invalid = infer_ms > MAX_ALLOWED_INFER_MS
-    if selection_metric == "point_error_mean":
-        return (latency_invalid, point_error, infer_ms, -max_corner_le_003, -point_le_002, -point_le_003, -point_le_001, screen_error, loss_mean)
-    if selection_metric == "point_le_0_02_ratio":
-        return (latency_invalid, -point_le_002, infer_ms, -max_corner_le_003, -point_le_001, point_error, -point_le_003, screen_error, loss_mean)
-    if selection_metric == "point_le_0_01_ratio":
-        return (latency_invalid, -point_le_001, point_error, -point_le_002, -point_le_003, -max_corner_le_003, screen_error, infer_ms, loss_mean)
-    if selection_metric == "max_corner_le_0_03_ratio":
-        return (latency_invalid, -max_corner_le_003, infer_ms, -point_le_001, point_error, -point_le_002, -point_le_003, screen_error, loss_mean)
-    if selection_metric == "point_le_0_03_ratio":
-        return (latency_invalid, -point_le_003, infer_ms, -max_corner_le_003, point_error, -point_le_002, -point_le_001, screen_error, loss_mean)
-    return (latency_invalid, loss_mean, infer_ms, point_error, -max_corner_le_003, -point_le_002, -point_le_003, -point_le_001, screen_error)
+    if selection_metric != "point_le_0_01_ratio":
+        raise ValueError("Only point_le_0_01_ratio is supported; update the training selection_metric")
+    return (-_checkpoint_metric_value(metrics, "point_le_0_01_ratio", -math.inf),)
 
 
 def _is_better_checkpoint(
     candidate_metrics: Mapping[str, Any],
     current_best_metrics: Mapping[str, Any] | None,
-    selection_metric: str = "loss_mean",
+    selection_metric: str = "point_le_0_01_ratio",
 ) -> bool:
+    candidate_rank = _checkpoint_rank(candidate_metrics, selection_metric)
     if current_best_metrics is None:
         return True
-    return _checkpoint_rank(candidate_metrics, selection_metric) < _checkpoint_rank(current_best_metrics, selection_metric)
+    return candidate_rank < _checkpoint_rank(current_best_metrics, selection_metric)
 
 
 def _select_training_device() -> torch.device:
@@ -1303,9 +1270,9 @@ def _evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device, 
             teacher_np = teacher_quad.cpu().numpy()
             r3_np = r3_quad.cpu().numpy()
             for idx in range(len(pred_quad)):
-                metric_rows.append(quad_geometry_metrics(manual_np[idx], pred_quad[idx]))
-                teacher_rows.append(quad_geometry_metrics(manual_np[idx], teacher_np[idx]))
-                r3_rows.append(quad_geometry_metrics(manual_np[idx], r3_np[idx]))
+                metric_rows.append(normalized_quad_geometry_metrics(manual_np[idx], pred_quad[idx], batch["image_size"][idx].cpu().numpy()))
+                teacher_rows.append(normalized_quad_geometry_metrics(manual_np[idx], teacher_np[idx], batch["image_size"][idx].cpu().numpy()))
+                r3_rows.append(normalized_quad_geometry_metrics(manual_np[idx], r3_np[idx], batch["image_size"][idx].cpu().numpy()))
     summary = summarize_geometry_metric_rows(metric_rows)
     teacher_summary = summarize_geometry_metric_rows(teacher_rows)
     r3_summary = summarize_geometry_metric_rows(r3_rows)
@@ -1393,7 +1360,7 @@ def _train_student(
     ema_enabled = 0.0 < ema_decay < 1.0
     ema_state = {key: value.detach().clone() for key, value in model.state_dict().items()} if ema_enabled else None
     history: list[dict[str, Any]] = []
-    selection_metric = str(checkpoint_cfg.get("selection_metric", "loss_mean"))
+    selection_metric = str(checkpoint_cfg.get("selection_metric", "point_le_0_01_ratio"))
     save_each_epoch = bool(checkpoint_cfg.get("save_each_epoch", False))
     epoch_checkpoint_dir = output_dir / "epochs"
     best_epoch = 0
@@ -1471,6 +1438,7 @@ def _train_student(
                 {
                     "epoch": epoch,
                     "state_dict": _snapshot_state_dict(ema_state if ema_state is not None else model.state_dict()),
+                    "metric_contract": METRIC_CONTRACT,
                     "val_metrics": val_metrics,
                     "holdout_metrics": holdout_metrics,
                     "selection_metric": selection_metric,
@@ -1488,6 +1456,7 @@ def _train_student(
     torch.save(
         {
             "state_dict": best_state,
+            "metric_contract": METRIC_CONTRACT,
             "input_size": input_size,
             "output_size": output_size,
             "base_channels": int(student_cfg.get("base_channels", 32)),

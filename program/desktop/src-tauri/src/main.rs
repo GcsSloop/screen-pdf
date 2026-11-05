@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod project_storage;
+
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use chrono::{DateTime, Local};
@@ -96,8 +98,9 @@ struct ProjectFile {
     version: u32,
     #[serde(rename = "dataStructureVersion", default)]
     data_structure_version: Option<u32>,
+    #[serde(default)]
     name: String,
-    #[serde(rename = "sourceDir")]
+    #[serde(rename = "sourceDir", default = "default_project_source")]
     source_dir: String,
     #[serde(rename = "projectPath")]
     project_path: Option<String>,
@@ -113,6 +116,8 @@ struct ProjectFile {
     tag_summary: Option<serde_json::Value>,
     pages: Vec<PageRecord>,
 }
+
+fn default_project_source() -> String { ".".to_string() }
 
 const CURRENT_DATA_STRUCTURE_VERSION: u32 = 2;
 const UPDATE_POLL_CHUNK_SIZE: usize = 64 * 1024;
@@ -1062,8 +1067,11 @@ fn run_engine_export(
     project: &ProjectFile,
     options: &ExportOptions,
 ) -> Result<ExportResult> {
+    let root = project_storage::root_for_runtime(project)?;
+    let project = project_storage::hydrate(project.clone(), &root)?;
+    let output_path = project_storage::export_path(&project, Path::new(&options.output_path))?;
+    project_storage::save(&project)?;
     let engine = engine_dir(app)?;
-    let output_path = PathBuf::from(&options.output_path);
     let work_dir = export_work_dir(&output_path);
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("failed to create {}", work_dir.display()))?;
@@ -1080,7 +1088,7 @@ fn run_engine_export(
         source_dir: project.source_dir.clone(),
         output_path: output_path.to_string_lossy().to_string(),
         work_dir: work_dir.to_string_lossy().to_string(),
-        options: options.clone(),
+        options: ExportOptions { output_path: output_path.to_string_lossy().into_owned(), ..options.clone() },
         pages: pages
             .into_iter()
             .map(|page| ExportPage {
@@ -1323,18 +1331,17 @@ fn preferred_project_file_in_dir(_folder_path: &Path) -> Option<PathBuf> {
 }
 
 fn load_project_file(project_path: &Path) -> Result<ProjectFile> {
-    let content = fs::read_to_string(project_path)
-        .with_context(|| format!("failed to read {}", project_path.display()))?;
-    let mut project = serde_json::from_str::<ProjectFile>(&content)
-        .with_context(|| format!("invalid {}", project_path.display()))?;
+    let path = project_storage::file_to_open(project_path)?;
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let project = serde_json::from_str::<ProjectFile>(&content)
+        .with_context(|| format!("invalid {}", path.display()))?;
+    let root = project_storage::root_for_file(&path, &project);
+    let mut project = project_storage::hydrate(project, &root)?;
     for page in &mut project.pages {
-        let current_thumb = page.thumb_path.as_deref().map(Path::new);
-        if current_thumb.is_none_or(|thumb| !thumb.exists()) {
-            page.thumb_path = generate_thumbnail(Path::new(&page.path));
-        }
+        page.thumb_path = generate_thumbnail(Path::new(&page.path));
     }
     project.data_structure_version = Some(infer_data_structure_version(&project));
-    project.project_path = Some(project_path.to_string_lossy().to_string());
     Ok(project)
 }
 
@@ -1354,13 +1361,10 @@ async fn cancel_scan() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn save_project(project_path: String, project: ProjectFile) -> Result<String, String> {
-    let mut updated = project;
-    updated.data_structure_version = Some(CURRENT_DATA_STRUCTURE_VERSION);
-    updated.project_path = Some(project_path.clone());
-    let content = serde_json::to_string_pretty(&updated).map_err(|err| err.to_string())?;
-    fs::write(&project_path, content).map_err(|err| err.to_string())?;
-    Ok(project_path)
+async fn save_project(project: ProjectFile) -> Result<String, String> {
+    project_storage::save(&project)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

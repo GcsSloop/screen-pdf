@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from supervision_utils import resolve_manual_quad
+from project_file import project_files, resolve_image_path
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".webp"}
@@ -166,7 +167,7 @@ def main() -> int:
     data_root = repo_root / "data"
     training_root = repo_root / "training"
 
-    project_files = sorted(source_root.glob("**/screen-pdf-project.json"))
+    project_files = project_files(source_root)
     if not project_files:
         raise SystemExit(f"no screen-pdf-project.json found under {source_root}")
 
@@ -192,7 +193,7 @@ def main() -> int:
         payload = json.loads(project_file.read_text(encoding="utf-8"))
         project_dir = project_file.parent
         project_slug = slugify_project(index)
-        project_name = payload.get("name") or project_dir.name
+        project_name = project_dir.name
         pages = payload.get("pages") or []
 
         status_counts: Counter[str] = Counter()
@@ -221,7 +222,7 @@ def main() -> int:
                     "project_name": project_name,
                     "page_id": page.get("id"),
                     "page_name": page.get("name"),
-                    "image_path": page.get("path"),
+                    "image_path": str(resolve_image_path(project_file, page, payload) or page.get("path") or ""),
                     "thumb_path": page.get("thumbPath"),
                     "preview_path": page.get("previewPath"),
                     "status": status,

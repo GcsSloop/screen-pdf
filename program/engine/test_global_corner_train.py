@@ -18,6 +18,9 @@ from corner_train import CornerHeatmapNet
 from global_corner_train import (
     GlobalCornerDataset,
     build_adaptive_teacher_target,
+    build_failure_layer_teacher_candidate_mask,
+    build_teacher_candidate_corner_mask,
+    build_teacher_candidate_corner_penalty,
     build_multi_teacher_target,
     apply_global_perspective_augmentation,
     bootstrap_inward_geometry_scale,
@@ -821,6 +824,237 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertAlmostEqual(guidance_scale, 1.0, places=6)
         self.assertEqual(selected_index.tolist(), [1, 1, 1, 1])
 
+    def test_build_teacher_candidate_corner_mask_blocks_only_disagreeing_opencv_corners(self) -> None:
+        manual = np.array(
+            [[0.10, 0.10], [0.90, 0.10], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        candidate_quads = np.array(
+            [
+                [[0.11, 0.11], [0.89, 0.11], [0.89, 0.79], [0.11, 0.79]],
+                [[0.105, 0.105], [0.895, 0.105], [0.70, 0.62], [0.105, 0.805]],
+            ],
+            dtype=np.float32,
+        )
+
+        mask = build_teacher_candidate_corner_mask(
+            manual,
+            candidate_quads,
+            candidate_sources=("teacher", "opencv"),
+            opencv_agreement_corner_max=0.05,
+        )
+
+        self.assertEqual(mask.tolist(), [[True, True, True, True], [True, True, False, True]])
+
+    def test_build_teacher_candidate_corner_mask_blocks_entire_opencv_candidate_when_sample_disagrees(self) -> None:
+        manual = np.array(
+            [[0.10, 0.10], [0.90, 0.10], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        candidate_quads = np.array(
+            [
+                [[0.11, 0.11], [0.89, 0.11], [0.89, 0.79], [0.11, 0.79]],
+                [[0.18, 0.16], [0.82, 0.18], [0.76, 0.70], [0.18, 0.72]],
+            ],
+            dtype=np.float32,
+        )
+
+        mask = build_teacher_candidate_corner_mask(
+            manual,
+            candidate_quads,
+            candidate_sources=("teacher", "opencv"),
+            opencv_agreement_sample_max=0.05,
+        )
+
+        self.assertEqual(mask.tolist(), [[True, True, True, True], [False, False, False, False]])
+
+    def test_build_teacher_candidate_corner_penalty_downweights_disagreeing_opencv_corner(self) -> None:
+        manual = np.array(
+            [[0.10, 0.10], [0.90, 0.10], [0.90, 0.80], [0.10, 0.80]],
+            dtype=np.float32,
+        )
+        candidate_quads = np.array(
+            [
+                [[0.11, 0.11], [0.89, 0.11], [0.89, 0.79], [0.11, 0.79]],
+                [[0.101, 0.101], [0.899, 0.101], [0.84, 0.75], [0.101, 0.801]],
+            ],
+            dtype=np.float32,
+        )
+
+        penalty = build_teacher_candidate_corner_penalty(
+            manual,
+            candidate_quads,
+            candidate_sources=("teacher", "opencv"),
+            opencv_agreement_corner_max=0.02,
+            opencv_agreement_sample_max=0.01,
+            penalty_scale=2.0,
+        )
+        target, guidance_scale, selected_index = build_multi_teacher_target(
+            manual,
+            candidate_quads,
+            blend_ratio=1.0,
+            candidate_penalty=penalty,
+            corner_error_max=0.20,
+            sample_error_max=0.20,
+        )
+
+        self.assertTrue(float(penalty[1, 2]) > 0.0)
+        np.testing.assert_allclose(target[2], candidate_quads[0, 2], atol=1e-6)
+        self.assertEqual(selected_index.tolist()[2], 0)
+        self.assertGreater(guidance_scale, 0.0)
+
+    def test_build_failure_layer_teacher_candidate_mask_prefers_opencv_when_recoverable(self) -> None:
+        mask = build_failure_layer_teacher_candidate_mask(
+            {
+                "failure_layer_category": "opencv_recoverable",
+                "failure_layer_opencv_gain": 0.08,
+            },
+            candidate_sources=("teacher", "r3", "opencv"),
+            rewrite_min_gain=0.03,
+            disable_hard_both_fail=False,
+        )
+
+        self.assertEqual(mask.tolist(), [False, False, True])
+
+    def test_build_failure_layer_teacher_candidate_mask_disables_hard_both_fail_teacher(self) -> None:
+        mask = build_failure_layer_teacher_candidate_mask(
+            {
+                "failure_layer_category": "hard_both_fail",
+            },
+            candidate_sources=("teacher", "r3", "opencv"),
+            rewrite_min_gain=0.03,
+            disable_hard_both_fail=True,
+        )
+
+        self.assertEqual(mask.tolist(), [False, False, False])
+
+    def test_global_corner_dataset_masks_opencv_teacher_when_it_disagrees_with_runtime_teacher(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "teacher_quad": [[22, 21], [178, 21], [180, 100], [20, 100]],
+                "opencv_best_quad": [[20.2, 20.2], [180.2, 20.2], [140, 72], [20.2, 100.2]],
+                "opencv_best_score": 0.9,
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                teacher_blend_ratio=1.0,
+                teacher_corner_error_max=0.20,
+                teacher_sample_error_max=0.20,
+                teacher_target_mode="oracle",
+                teacher_candidate_sources=("teacher", "opencv"),
+                teacher_opencv_score_min=0.5,
+                teacher_opencv_agreement_corner_max=0.05,
+            )
+            item = dataset[0]
+
+        np.testing.assert_allclose(
+            item["teacher_target"].numpy(),
+            np.array(
+                [
+                    [0.101, 0.16833334],
+                    [0.901, 0.16833334],
+                    [0.9, 0.8333333],
+                    [0.1, 0.8333333],
+                ],
+                dtype=np.float32,
+            ),
+            atol=1e-6,
+        )
+
+    def test_global_corner_dataset_can_rewrite_teacher_target_to_opencv_for_failure_layer_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "teacher_quad": [[22, 21], [178, 21], [180, 100], [20, 100]],
+                "opencv_best_quad": [[20.2, 20.2], [180.2, 20.2], [180.2, 100.2], [20.2, 100.2]],
+                "opencv_best_score": 0.9,
+                "failure_layer_category": "opencv_recoverable",
+                "failure_layer_opencv_gain": 0.08,
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                teacher_blend_ratio=1.0,
+                teacher_corner_error_max=0.20,
+                teacher_sample_error_max=0.20,
+                teacher_target_mode="oracle",
+                teacher_candidate_sources=("teacher", "opencv"),
+                teacher_opencv_score_min=0.5,
+                teacher_opencv_agreement_corner_max=0.01,
+                teacher_failure_layer_rewrite_min_gain=0.03,
+            )
+            item = dataset[0]
+
+        np.testing.assert_allclose(
+            item["teacher_target"].numpy(),
+            np.array(
+                [
+                    [0.101, 0.16833334],
+                    [0.901, 0.16833334],
+                    [0.901, 0.835],
+                    [0.101, 0.835],
+                ],
+                dtype=np.float32,
+            ),
+            atol=1e-5,
+        )
+
+    def test_global_corner_dataset_can_disable_teacher_guidance_for_hard_both_fail_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((120, 200, 3), 128, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            sample = {
+                "image_path": str(image_path),
+                "manual_quad": [[20, 20], [180, 20], [180, 100], [20, 100]],
+                "teacher_quad": [[24, 24], [184, 24], [180, 100], [20, 100]],
+                "opencv_best_quad": [[26, 26], [170, 24], [176, 96], [24, 98]],
+                "opencv_best_score": 0.7,
+                "failure_layer_category": "hard_both_fail",
+            }
+            manifest = root / "train.jsonl"
+            manifest.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            dataset = GlobalCornerDataset(
+                manifest,
+                input_size=128,
+                output_size=32,
+                augment=False,
+                teacher_blend_ratio=1.0,
+                teacher_corner_error_max=0.20,
+                teacher_sample_error_max=0.20,
+                teacher_target_mode="oracle",
+                teacher_candidate_sources=("teacher", "opencv"),
+                teacher_failure_layer_rewrite_min_gain=0.03,
+                teacher_failure_layer_disable_hard_both_fail=True,
+            )
+            item = dataset[0]
+
+        self.assertAlmostEqual(float(item["teacher_guidance_scale"]), 0.0, places=6)
+
     def test_global_corner_dataset_exposes_teacher_target_and_scale(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1571,6 +1805,53 @@ class GlobalCornerTrainTests(unittest.TestCase):
         self.assertAlmostEqual(float(checkpoint["teacher_corner_error_max"]), 0.03, places=6)
         self.assertAlmostEqual(float(checkpoint["teacher_sample_error_max"]), 0.03, places=6)
         self.assertAlmostEqual(float(checkpoint["teacher_activation_min_disagreement"]), 0.01, places=6)
+
+    def test_train_global_corner_model_saves_failure_layer_teacher_rewrite_metadata_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = np.full((96, 160, 3), 200, dtype=np.uint8)
+            image_path = root / "sample.jpg"
+            cv2.imwrite(str(image_path), image)
+            row = {
+                "page_id": "sample",
+                "project_name": "demo",
+                "image_path": str(image_path),
+                "manual_quad": [[16, 12], [144, 12], [144, 84], [16, 84]],
+                "teacher_quad": [[17, 12], [143, 13], [145, 84], [16, 84]],
+                "opencv_quad": [[18, 13], [142, 12], [144, 83], [17, 85]],
+                "opencv_score": 0.92,
+                "failure_layer_category": "opencv_recoverable",
+                "failure_layer_union_gain": 0.08,
+            }
+            split_dir = root / "split"
+            split_dir.mkdir()
+            payload = json.dumps(row, ensure_ascii=False) + "\n"
+            for name in ("train", "test"):
+                (split_dir / f"{name}.jsonl").write_text(payload, encoding="utf-8")
+
+            result = train_global_corner_model(
+                dataset_root=root,
+                output_dir=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-3,
+                input_size=64,
+                output_size=16,
+                channels=8,
+                split_dir=split_dir,
+                teacher_guidance_weight=0.3,
+                teacher_blend_ratio=0.5,
+                teacher_target_mode="oracle",
+                teacher_candidate_sources=("teacher", "opencv"),
+                teacher_opencv_score_min=0.5,
+                teacher_failure_layer_rewrite_min_gain=0.03,
+                teacher_failure_layer_disable_hard_both_fail=True,
+            )
+
+            checkpoint = torch.load(result.model_path, map_location="cpu")
+
+        self.assertAlmostEqual(float(checkpoint["teacher_failure_layer_rewrite_min_gain"]), 0.03, places=6)
+        self.assertTrue(bool(checkpoint["teacher_failure_layer_disable_hard_both_fail"]))
 
     def test_train_global_corner_model_saves_sample_reweight_metadata_in_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,0 +1,395 @@
+{
+  "architecture": "screen_corner_single_v1",
+  "status": "promoted",
+  "public_name": "screen_corner_single_round042_qujingjing_xuhui",
+  "model_release_id": "model-20261029-180536-9db7ad220b21",
+  "promoted_at": "2026-10-29T18:05:36.835718+00:00",
+  "round": "round_042",
+  "model_id": "screen_corner_single_9db7ad220b21",
+  "runtime_files": [
+    "screen_corner_single.pt"
+  ],
+  "runtime_digest": "9db7ad220b2140b64d2d1d92c4ad48abeea1931199491d1f401f5d655099affa",
+  "artifacts": {
+    "single": {
+      "path": "models/runtime/screen_corner_single.pt",
+      "sha1": "ea263c2e657f2db78da614ad21800a721d308695",
+      "sha256": "9db7ad220b2140b64d2d1d92c4ad48abeea1931199491d1f401f5d655099affa",
+      "bytes": 4736582
+    }
+  },
+  "source_checkpoint": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/training/runs/screen_corner_single/round_042/checkpoints/screen_corner_single.pt",
+  "source_sha256": "9db7ad220b2140b64d2d1d92c4ad48abeea1931199491d1f401f5d655099affa",
+  "previous_promoted_model": "screen_corner_single_c2409691b054",
+  "previous_model_release_id": "model-20261029-152403-c2409691b054",
+  "initialization": "formal round_041 single-file runtime; encoder and coarse head frozen; local fine-tune with replay of the base snapshot plus 36 Zhang Liwen pages, adding 30 training pages from Qu Jingjing and Xu Hui",
+  "teacher_models": {
+    "initialization": "screen_corner_single_c2409691b054"
+  },
+  "data_revision": "screen_corner_single_all_manual_3_20fine_whitemix_v1 plus replay 202610-open-source-bigdata-zhangliwen and new 202610-open-source-bigdata-qujingjing / 202610-open-source-bigdata-xuhui",
+  "training_dependencies_are_runtime_dependencies": false,
+  "validation_summary": {
+    "pooled_development": {
+      "pages": 508,
+      "corners": 2032,
+      "hit_corners": 1785,
+      "point_le_0_01_ratio": 0.8784448818897638
+    },
+    "base_development483": {
+      "pages": 483,
+      "corners": 1932,
+      "hit_corners": 1688,
+      "point_le_0_01_ratio": 0.8737060041407867
+    },
+    "base_observed_regression266": {
+      "pages": 266,
+      "corners": 1064,
+      "hit_corners": 936,
+      "point_le_0_01_ratio": 0.8796992481203008
+    },
+    "new_development12": {
+      "pages": 12,
+      "corners": 48,
+      "hit_corners": 47,
+      "point_le_0_01_ratio": 0.9791666666666666
+    },
+    "new_observed_regression12": {
+      "pages": 12,
+      "corners": 48,
+      "hit_corners": 46,
+      "point_le_0_01_ratio": 0.9583333333333334
+    },
+    "new_scene54_coverage_diagnostic": {
+      "pages": 54,
+      "corners": 216,
+      "hit_corners": 213,
+      "point_le_0_01_ratio": 0.9861111111111112
+    },
+    "new_scenes246_coverage_diagnostic": {
+      "pages": 246,
+      "corners": 984,
+      "hit_corners": 891,
+      "point_le_0_01_ratio": 0.9054878048780488
+    },
+    "replay61_coverage_diagnostic": {
+      "pages": 61,
+      "corners": 244,
+      "hit_corners": 240,
+      "point_le_0_01_ratio": 0.9836065573770492
+    },
+    "frozen1808_coverage_diagnostic": {
+      "pages": 1808,
+      "corners": 7232,
+      "hit_corners": 6881,
+      "point_le_0_01_ratio": 0.9514657079646017
+    },
+    "corpus2605_coverage_diagnostic": {
+      "pages": 2605,
+      "corners": 10420,
+      "hit_corners": 9953,
+      "point_le_0_01_ratio": 0.9551823416506718
+    },
+    "snapshot2359_coverage_diagnostic": {
+      "pages": 2359,
+      "corners": 9436,
+      "hit_corners": 9062,
+      "point_le_0_01_ratio": 0.960364561254769
+    },
+    "pooled_observed_regression": {
+      "pages": 290,
+      "corners": 1160,
+      "hit_corners": 1029,
+      "point_le_0_01_ratio": 0.8870689655172413
+    },
+    "replay_development13": {
+      "pages": 13,
+      "corners": 52,
+      "hit_corners": 50,
+      "point_le_0_01_ratio": 0.9615384615384616
+    },
+    "replay_observed_regression12": {
+      "pages": 12,
+      "corners": 48,
+      "hit_corners": 47,
+      "point_le_0_01_ratio": 0.9791666666666666
+    },
+    "new_24pages_all": {
+      "pages": 24,
+      "corners": 96,
+      "hit_corners": 93,
+      "point_le_0_01_ratio": 0.96875
+    }
+  },
+  "formal035_reference": {
+    "pooled_development": {
+      "pages": 469,
+      "corners": 1876,
+      "hit_corners": 1604,
+      "point_le_0_01_ratio": 0.8550106609808102
+    },
+    "observed_regression": {
+      "pages": 254,
+      "corners": 1016,
+      "hit_corners": 874,
+      "point_le_0_01_ratio": 0.860236220472441
+    },
+    "frozen1808_coverage_diagnostic": {
+      "pages": 1808,
+      "corners": 7232,
+      "hit_corners": 6853,
+      "point_le_0_01_ratio": 0.9475940265486725
+    },
+    "all_manual_coverage_diagnostic": {
+      "pages": 2275,
+      "corners": 9100,
+      "hit_corners": 8600,
+      "point_le_0_01_ratio": 0.945054945054945
+    }
+  },
+  "collection_regressions": {},
+  "promotion_decision": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/training/runs/screen_corner_single/round_042/reports/promotion_decision.json",
+  "training_report": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/research/experiments/2026-10-29-qujingjing-xuhui.md",
+  "regression_verification": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/research/experiments/2026-10-29-qujingjing-xuhui-regression/README.md",
+  "promotion_audit": "/Users/gcssloop/WorkSpace/AIGC/screen-pdf/training/runs/screen_corner_single/round_042/reports/promotion-audit/evaluation.json",
+  "full_conference_benchmark_rerun": true,
+  "limitations": [
+    "single-seed candidate; 12-page / 48-corner new-scene development set used for selection",
+    "new-scene labels are runtime-candidate-seeded (0.23%-6.14% manual adjustment); not independent truth or a blind test",
+    "all historical holdouts already observed; development and regression are the same event/room/camera",
+    "control (replay only) also improved old domain +11/+7, so part of the gain is local-head refitting rather than new data",
+    "frozen 1808 and corpus diagnostics contain training pages and are coverage diagnostics only",
+    "remaining misses: IMG_2817 bottom-right 1.28%, IMG_2818 bottom-left 1.77%, IMG_2826 top-right 1.15%"
+  ],
+  "notes": "User explicitly requested promotion and a new installer; local ad-hoc signed build, not notarized or published externally.",
+  "formal036_reference": {
+    "pooled_development": {
+      "pages": 478,
+      "corners": 1912,
+      "hit_corners": 1640,
+      "point_le_0_01_ratio": 0.8577405857740585
+    },
+    "observed_regression": {
+      "pages": 262,
+      "corners": 1048,
+      "hit_corners": 913,
+      "point_le_0_01_ratio": 0.8711832061068703
+    },
+    "frozen1808_coverage_diagnostic": {
+      "pages": 1808,
+      "corners": 7232,
+      "hit_corners": 6846,
+      "point_le_0_01_ratio": 0.9466261061946902
+    },
+    "all_manual2275_coverage_diagnostic": {
+      "pages": 2275,
+      "corners": 9100,
+      "hit_corners": 8599,
+      "point_le_0_01_ratio": 0.944945054945055
+    },
+    "old_development432": {
+      "pages": 432,
+      "corners": 1728,
+      "hit_corners": 1494,
+      "point_le_0_01_ratio": 0.8645833333333334
+    },
+    "old_regression216": {
+      "pages": 216,
+      "corners": 864,
+      "hit_corners": 773,
+      "point_le_0_01_ratio": 0.8946759259259259
+    }
+  },
+  "collection_changes": {
+    "AWE 专项测试": {
+      "previous": 26,
+      "promoted": 26,
+      "delta": 0
+    },
+    "上海·元宇宙产业嘉年华": {
+      "previous": 848,
+      "promoted": 852,
+      "delta": 4
+    },
+    "上海·大屏幕显示百家讲坛": {
+      "previous": 66,
+      "promoted": 66,
+      "delta": 0
+    },
+    "中国智慧道路照明大会·3 月 19 日": {
+      "previous": 1823,
+      "promoted": 1827,
+      "delta": 4
+    },
+    "中国智慧道路照明大会·3 月 20 日": {
+      "previous": 534,
+      "promoted": 534,
+      "delta": 0
+    },
+    "北京·InfoComm": {
+      "previous": 55,
+      "promoted": 56,
+      "delta": 1
+    },
+    "商场拍屏专项测试": {
+      "previous": 408,
+      "promoted": 416,
+      "delta": 8
+    },
+    "开放原子开发者大会": {
+      "previous": 993,
+      "promoted": 998,
+      "delta": 5
+    },
+    "扬州国城豪专项测试": {
+      "previous": 777,
+      "promoted": 778,
+      "delta": 1
+    },
+    "杭州·第十五届智能交通市场年会": {
+      "previous": 332,
+      "promoted": 332,
+      "delta": 0
+    },
+    "杭州·隧道照明与安全论坛": {
+      "previous": 239,
+      "promoted": 240,
+      "delta": 1
+    },
+    "福州·第二十八届高速公路信息化大会": {
+      "previous": 650,
+      "promoted": 652,
+      "delta": 2
+    },
+    "追光卅载·AI 赋能活动": {
+      "previous": 104,
+      "promoted": 104,
+      "delta": 0
+    }
+  },
+  "formal037_reference": {
+    "pooled_development": {
+      "pages": 483,
+      "corners": 1932,
+      "hit_corners": 1663,
+      "point_le_0_01_ratio": 0.8607660455486542
+    },
+    "observed_regression": {
+      "pages": 266,
+      "corners": 1064,
+      "hit_corners": 926,
+      "point_le_0_01_ratio": 0.8703007518796992
+    },
+    "frozen1808_coverage_diagnostic": {
+      "pages": 1808,
+      "corners": 7232,
+      "hit_corners": 6865,
+      "point_le_0_01_ratio": 0.9492533185840708
+    },
+    "all_manual2275_coverage_diagnostic": {
+      "pages": 2275,
+      "corners": 9100,
+      "hit_corners": 8614,
+      "point_le_0_01_ratio": 0.9465934065934066
+    },
+    "old_development432": {
+      "pages": 432,
+      "corners": 1728,
+      "hit_corners": 1499,
+      "point_le_0_01_ratio": 0.8674768518518519
+    },
+    "old_regression216": {
+      "pages": 216,
+      "corners": 864,
+      "hit_corners": 773,
+      "point_le_0_01_ratio": 0.8946759259259259
+    }
+  },
+  "formal038_reference": {
+    "pooled_development": {
+      "pages": 521,
+      "corners": 2084,
+      "hit_corners": 1788,
+      "point_le_0_01_ratio": 0.8579654510556622
+    },
+    "observed_regression": {
+      "pages": 303,
+      "corners": 1212,
+      "hit_corners": 1045,
+      "point_le_0_01_ratio": 0.8622112211221122
+    },
+    "frozen1808_coverage_diagnostic": {
+      "pages": 1808,
+      "corners": 7232,
+      "hit_corners": 6861,
+      "point_le_0_01_ratio": 0.948700221238938
+    },
+    "corpus2551_coverage_diagnostic": {
+      "pages": 2551,
+      "corners": 10204,
+      "hit_corners": 9605,
+      "point_le_0_01_ratio": 0.941297530380243
+    },
+    "snapshot2359_coverage_diagnostic": {
+      "pages": 2359,
+      "corners": 9436,
+      "hit_corners": 9036,
+      "point_le_0_01_ratio": 0.9576091564222128
+    },
+    "old_development483": {
+      "pages": 483,
+      "corners": 1932,
+      "hit_corners": 1671,
+      "point_le_0_01_ratio": 0.8649068322981367
+    },
+    "old_regression266": {
+      "pages": 266,
+      "corners": 1064,
+      "hit_corners": 930,
+      "point_le_0_01_ratio": 0.8740601503759399
+    }
+  },
+  "formal041_reference": {
+    "base_development483": {
+      "pages": 483,
+      "corners": 1932,
+      "hit_corners": 1668,
+      "point_le_0_01_ratio": 0.8633540372670807
+    },
+    "base_observed_regression266": {
+      "pages": 266,
+      "corners": 1064,
+      "hit_corners": 925,
+      "point_le_0_01_ratio": 0.8693609022556391
+    },
+    "new_development12": {
+      "pages": 12,
+      "corners": 48,
+      "hit_corners": 42,
+      "point_le_0_01_ratio": 0.875
+    },
+    "new_observed_regression12": {
+      "pages": 12,
+      "corners": 48,
+      "hit_corners": 45,
+      "point_le_0_01_ratio": 0.9375
+    },
+    "frozen1808_coverage_diagnostic": {
+      "pages": 1808,
+      "corners": 7232,
+      "hit_corners": 6855,
+      "point_le_0_01_ratio": 0.947870575221239
+    },
+    "corpus2605_coverage_diagnostic": {
+      "pages": 2605,
+      "corners": 10420,
+      "hit_corners": 9897,
+      "point_le_0_01_ratio": 0.9498080614203455
+    },
+    "snapshot2359_coverage_diagnostic": {
+      "pages": 2359,
+      "corners": 9436,
+      "hit_corners": 9030,
+      "point_le_0_01_ratio": 0.956973293768546
+    }
+  }
+}

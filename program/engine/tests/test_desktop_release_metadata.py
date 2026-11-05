@@ -23,8 +23,17 @@ from scripts.desktop.release_metadata import (  # noqa: E402
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_resolve_desktop_version_reads_matching_desktop_versions(self) -> None:
-        version = resolve_desktop_version(REPO_ROOT)
-        self.assertEqual(version, "0.2.7")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "program" / "desktop"
+            tauri = desktop / "src-tauri"
+            tauri.mkdir(parents=True)
+            for path in (desktop / "package.json", tauri / "tauri.conf.json"):
+                path.write_text(json.dumps({"version": "1.2.3"}), encoding="utf-8")
+            (tauri / "Cargo.toml").write_text(
+                '[package]\nname = "screen-pdf"\nversion = "1.2.3"\n', encoding="utf-8"
+            )
+            self.assertEqual(resolve_desktop_version(root), "1.2.3")
 
     def test_verify_desktop_versions_match_rejects_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -19,8 +19,14 @@ describe("editor ui helpers", () => {
       "toggleExportSettingsBtn",
       "exportProjectBtn"
     ]);
-    expect(TOOLBAR_ICON_BUTTONS.find((item) => item.id === "openFolderBtn")?.tooltip).toContain("扫描图片");
-    expect(TOOLBAR_ICON_BUTTONS.find((item) => item.id === "toggleExportSettingsBtn")?.label).toBe("导出配置");
+    expect(TOOLBAR_ICON_BUTTONS.find((item) => item.id === "openFolderBtn")?.label).toBe("打开项目文件夹");
+    expect(TOOLBAR_ICON_BUTTONS.find((item) => item.id === "openFolderBtn")?.tooltip).toBe(
+      "打开图片文件夹并生成当前项目。"
+    );
+    expect(TOOLBAR_ICON_BUTTONS.find((item) => item.id === "toggleExportSettingsBtn")?.label).toBe("导出选项");
+    expect(TOOLBAR_ICON_BUTTONS.find((item) => item.id === "exportProjectBtn")?.tooltip).toBe(
+      "按当前顺序导出 PDF，并应用压缩与 OCR 文本层。"
+    );
   });
 
   it("places the magnifier away from the active corner line when there is room", () => {
