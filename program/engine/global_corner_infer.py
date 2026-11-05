@@ -16,7 +16,7 @@ from corner_train import (
     remap_legacy_head_state_dict,
     select_torch_device,
 )
-from dataset_benchmark import quad_geometry_metrics, summarize_geometry_metric_rows
+from dataset_benchmark import METRIC_CONTRACT, quad_geometry_metrics, summarize_geometry_metric_rows
 from global_corner_train import build_global_feature_tensor, denormalize_corners
 
 
@@ -83,6 +83,7 @@ def evaluate_global_split(model_path: Path, split_dir: Path, split: str = "test"
     summary = summarize_geometry_metric_rows(metric_rows)
     return {
         "pages": len(rows),
+        "metric_contract": METRIC_CONTRACT,
         "device": device.type,
         "decode_mode": str(checkpoint.get("decode_mode", "argmax")),
         **summary,

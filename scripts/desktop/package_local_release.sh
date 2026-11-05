@@ -40,7 +40,11 @@ case "$PLATFORM" in
 esac
 
 bash "$ROOT_DIR/scripts/release/sync_release_metadata.sh"
-pnpm --dir "$ROOT_DIR/program/desktop" tauri build
+BUILD_ARGS=(build)
+if [[ -n "${SCREEN_PDF_TAURI_CONFIG:-}" ]]; then
+  BUILD_ARGS+=(--config "$SCREEN_PDF_TAURI_CONFIG")
+fi
+pnpm --dir "$ROOT_DIR/program/desktop" tauri "${BUILD_ARGS[@]}"
 
 if [[ "$PLATFORM" == "macos" ]]; then
   bash "$ROOT_DIR/scripts/desktop/notarize_macos.sh"

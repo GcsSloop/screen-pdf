@@ -15,10 +15,44 @@ import numpy as np
 from perspective_detect import detect_best_candidate_with_profile, load_opencv_profile
 from perspective_detect import order_points
 from supervision_utils import resolve_supervision_quad
+from project_file import project_files, resolve_image_path
 from train_scoring_profile import quad_iou
 
 
 PageRecord = dict[str, Any]
+METRIC_CONTRACT_VERSION = "screen_point_hit_pixel_v3"
+METRIC_CONTRACT = {
+    "version": METRIC_CONTRACT_VERSION,
+    "coordinate_unit": "original_image_pixels",
+    "point_normalizer": "manual_quad_axis_aligned_bbox_diagonal",
+    "metric": "point_le_0_01_ratio",
+    "threshold": 0.01,
+    "aggregation": "total hit corners / total annotated corners; failures count as four misses",
+    "checkpoint_selection": "maximize point_le_0_01_ratio only; retain earlier checkpoint on ties",
+}
+
+
+def checkpoint_selection_key(summary: dict[str, float]) -> tuple[float]:
+    """One accuracy objective, with no secondary metric or latency tie-breaker."""
+    return (-float(summary.get("point_le_0_01_ratio", summary.get("point_le_0_01", 0.0))),)
+
+
+def summarize_point_hits(manual_quads, predicted_quads) -> dict[str, int | float]:
+    """Pixel-coordinate, corner-weighted score. None/nonfinite predictions miss."""
+    if len(manual_quads) != len(predicted_quads):
+        raise ValueError("Every annotated page must have a prediction or failure entry")
+    hits = 0
+    for manual, prediction in zip(manual_quads, predicted_quads):
+        if prediction is None:
+            continue
+        prediction = np.asarray(prediction)
+        if prediction.shape != (4, 2) or not np.isfinite(prediction).all():
+            continue
+        errors = normalized_corner_errors(manual, prediction)
+        hits += int(np.count_nonzero(errors <= 0.01))
+    corners = len(manual_quads) * 4
+    return {"pages": len(manual_quads), "corners": corners, "hit_corners": hits,
+            "point_le_0_01_ratio": hits / corners if corners else 0.0}
 
 
 def _ordered_quad(quad: list[list[float]] | np.ndarray) -> np.ndarray:
@@ -204,17 +238,45 @@ def quad_geometry_metrics(
     manual_quad: list[list[float]] | np.ndarray,
     predicted_quad: list[list[float]] | np.ndarray,
 ) -> dict[str, float]:
+    """Evaluate original-image pixel coordinates; normalized callers must restore scale."""
     corner_errors = normalized_corner_errors(manual_quad, predicted_quad)
+    pixel_errors = np.linalg.norm(_ordered_quad(predicted_quad) - _ordered_quad(manual_quad), axis=1)
     return {
         "point_error": float(corner_errors.mean()),
         "corner_error_00": float(corner_errors[0]),
         "corner_error_01": float(corner_errors[1]),
         "corner_error_02": float(corner_errors[2]),
         "corner_error_03": float(corner_errors[3]),
+        "point_error_px": float(pixel_errors.mean()),
+        "max_corner_error_px": float(pixel_errors.max()),
         "screen_relative_point_error": screen_relative_point_error(manual_quad, predicted_quad),
         "max_corner_error": max_corner_error(manual_quad, predicted_quad),
         "perspective_tilt_error": perspective_tilt_error(manual_quad, predicted_quad),
         "quad_inset_ratio": quad_inset_ratio(manual_quad, predicted_quad),
+    }
+
+
+def normalized_quad_geometry_metrics(
+    manual_quad: list[list[float]] | np.ndarray,
+    predicted_quad: list[list[float]] | np.ndarray,
+    image_size: list[float] | np.ndarray,
+) -> dict[str, float]:
+    """Restore normalized x/y using the original image (or ROI) width and height."""
+    scale = np.asarray(image_size, dtype=np.float32)
+    if scale.shape != (2,) or not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+        raise ValueError("image_size must contain positive original width and height")
+    return quad_geometry_metrics(np.asarray(manual_quad) * scale, np.asarray(predicted_quad) * scale)
+
+
+def failed_quad_geometry_metrics() -> dict[str, float]:
+    """Count missed detections as failures without inventing pixel measurements."""
+    return {
+        "point_error": 1.0,
+        **{f"corner_error_{index:02d}": 1.0 for index in range(4)},
+        "screen_relative_point_error": 1.0,
+        "max_corner_error": 1.0,
+        "perspective_tilt_error": 90.0,
+        "quad_inset_ratio": 1.0,
     }
 
 
@@ -229,6 +291,10 @@ def summarize_geometry_metric_rows(rows: list[dict[str, float]]) -> dict[str, fl
             "point_le_0_03_ratio": 0.0,
             "point_le_0_02_ratio": 0.0,
             "point_le_0_01_ratio": 0.0,
+            "quad_le_0_01_ratio": 0.0,
+            "point_error_px_mean": 0.0,
+            "max_corner_error_px_p95": 0.0,
+            "pixel_metric_pages": 0,
             "screen_relative_error_mean": 0.0,
             "screen_relative_error_max": 0.0,
             "screen_relative_error_p95": 0.0,
@@ -256,6 +322,7 @@ def summarize_geometry_metric_rows(rows: list[dict[str, float]]) -> dict[str, fl
         ],
         dtype=np.float32,
     )
+    pixel_rows = [row for row in rows if "point_error_px" in row and "max_corner_error_px" in row]
     return {
         "pages": len(rows),
         "point_error_mean": round(float(point_errors.mean()), 4),
@@ -265,6 +332,10 @@ def summarize_geometry_metric_rows(rows: list[dict[str, float]]) -> dict[str, fl
         "point_le_0_03_ratio": round(float((point_errors <= 0.03).mean()), 4),
         "point_le_0_02_ratio": round(float((point_errors <= 0.02).mean()), 4),
         "point_le_0_01_ratio": round(float((corner_errors <= 0.01).mean()), 4),
+        "quad_le_0_01_ratio": round(float(np.all(corner_errors.reshape(-1, 4) <= 0.01, axis=1).mean()), 4),
+        "point_error_px_mean": round(float(np.mean([row["point_error_px"] for row in pixel_rows])), 4) if pixel_rows else 0.0,
+        "max_corner_error_px_p95": round(float(np.percentile([row["max_corner_error_px"] for row in pixel_rows], 95)), 4) if pixel_rows else 0.0,
+        "pixel_metric_pages": len(pixel_rows),
         "screen_relative_error_mean": round(float(screen_errors.mean()), 4),
         "screen_relative_error_max": round(float(screen_errors.max()), 4),
         "screen_relative_error_p95": round(float(np.percentile(screen_errors, 95)), 4),
@@ -286,31 +357,19 @@ def point_success_ratio(errors: list[float], threshold: float) -> float:
     return float(sum(error <= threshold for error in errors) / len(errors))
 
 
-def _resolve_image_path(project_path: Path, page: dict[str, Any]) -> Path | None:
-    raw_path = page.get("path")
-    if not raw_path:
-        return None
-    image_path = Path(raw_path)
-    candidates = [
-        image_path,
-        project_path.parent / raw_path,
-        project_path.parent / image_path.name,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+def _resolve_image_path(project_path: Path, page: dict[str, Any], project_data=None) -> Path | None:
+    return resolve_image_path(project_path, page, project_data)
 
 
 def load_manual_pages(dataset_root: Path) -> list[PageRecord]:
     pages: list[PageRecord] = []
-    for project_path in sorted(dataset_root.rglob("screen-pdf-project.json")):
+    for project_path in project_files(dataset_root):
         data = json.loads(project_path.read_text(encoding="utf-8"))
         for page in data.get("pages", []):
             manual_quad, _ = resolve_supervision_quad(page)
             if not manual_quad:
                 continue
-            image_path = _resolve_image_path(project_path, page)
+            image_path = _resolve_image_path(project_path, page, data)
             if image_path is None:
                 continue
             image = cv2.imread(str(image_path))

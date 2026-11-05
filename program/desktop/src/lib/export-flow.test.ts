@@ -112,6 +112,16 @@ describe("export flow helpers", () => {
     expect(view.body).toContain("python3 not found");
   });
 
+  it("uses concise empty-state copy before a project is opened", () => {
+    const view = buildExportPanelState(null, options, {
+      mode: "idle",
+      result: null
+    });
+
+    expect(view.tone).toBe("empty");
+    expect(view.body).toBe("打开项目后可设置导出选项。");
+  });
+
   it("updates selected page id in project copy", () => {
     expect(withSelectedPage(project(), "p1").selectedPageId).toBe("p1");
   });

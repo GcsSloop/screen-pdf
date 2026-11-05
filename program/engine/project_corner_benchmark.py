@@ -8,9 +8,10 @@ from typing import Any, Callable
 
 import cv2
 
-from dataset_benchmark import quad_geometry_metrics, summarize_geometry_metric_rows
+from dataset_benchmark import METRIC_CONTRACT, failed_quad_geometry_metrics, quad_geometry_metrics, summarize_geometry_metric_rows
 from detect_frame import run_model_detection
 from supervision_utils import resolve_supervision_quad
+from project_file import resolve_image_path
 
 
 MethodRunner = Callable[[str], dict[str, Any] | None]
@@ -47,7 +48,8 @@ def benchmark_project(
     pages = 0
     for page in data.get("pages", []):
         manual_quad, _ = resolve_supervision_quad(page)
-        image_path = page.get("path")
+        image = resolve_image_path(project_path, page, data)
+        image_path = str(image) if image else page.get("path")
         if not manual_quad or not image_path:
             continue
         pages += 1
@@ -90,14 +92,17 @@ def benchmark_project(
             )
 
         runtime_result = runtime_runner(str(image_path)) if runtime_runner is not None else None
-        if runtime_result is not None and runtime_result.get("quad") is not None:
-            metrics = quad_geometry_metrics(manual_quad, runtime_result["quad"])
-            method_metrics["runtime_model"].append(metrics)
-            method_rows["runtime_model"].append(
+        metrics = (
+            quad_geometry_metrics(manual_quad, runtime_result["quad"])
+            if runtime_result is not None and runtime_result.get("quad") is not None
+            else failed_quad_geometry_metrics()
+        )
+        method_metrics["runtime_model"].append(metrics)
+        method_rows["runtime_model"].append(
                 {
                     "page_id": page_id,
                     "image_path": image_path,
-                    "method": runtime_result.get("method", "runtime_model"),
+                    "method": (runtime_result or {}).get("method", "none"),
                     "point_error": round(float(metrics["point_error"]), 4),
                     "screen_relative_error": round(float(metrics["screen_relative_point_error"]), 4),
                     "max_corner_error": round(float(metrics["max_corner_error"]), 4),
@@ -112,6 +117,7 @@ def benchmark_project(
         for method, rows in sorted(method_rows.items())
     }
     return {
+        "metric_contract": METRIC_CONTRACT,
         "project_path": str(project_path),
         "project_name": project_path.parent.name,
         "pages": pages,

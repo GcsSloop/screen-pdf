@@ -24,26 +24,26 @@ const TOOLBAR_ICON_SVGS: Record<string, string> = {
 export const TOOLBAR_ICON_BUTTONS: ToolbarIconButton[] = [
   {
     id: "openFolderBtn",
-    label: "打开文件夹",
-    tooltip: "打开文件夹并扫描图片，生成当前项目。",
+    label: "打开项目文件夹",
+    tooltip: "打开图片文件夹并生成当前项目。",
     icon: "folder"
   },
   {
     id: "loadProjectBtn",
-    label: "加载项目",
-    tooltip: "加载已保存的项目 JSON，继续编辑角点和导出设置。",
+    label: "加载项目 JSON",
+    tooltip: "加载已保存的项目文件，继续编辑角点和导出选项。",
     icon: "upload"
   },
   {
     id: "saveProjectBtn",
-    label: "保存项目",
-    tooltip: "保存当前页面顺序、角点草稿和标签信息。",
+    label: "保存当前项目",
+    tooltip: "保存页面顺序、角点和状态到项目根目录。",
     icon: "save"
   },
   {
     id: "toggleExportSettingsBtn",
-    label: "导出配置",
-    tooltip: "设置 PDF 输出路径、OCR、压缩尺寸和自动导出规则。",
+    label: "导出选项",
+    tooltip: "选择导出目录，并设置 OCR、压缩尺寸和导出规则。",
     icon: "settings"
   },
   {

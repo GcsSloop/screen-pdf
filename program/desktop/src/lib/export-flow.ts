@@ -79,7 +79,7 @@ export function buildExportPanelState(
   if (!project) {
     return {
       tone: "empty",
-      body: "打开文件夹后即可配置导出。"
+      body: "打开项目后可设置导出选项。"
     };
   }
 

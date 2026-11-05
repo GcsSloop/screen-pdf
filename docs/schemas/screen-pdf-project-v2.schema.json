@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScreenPDF portable project, file format v2",
+  "type": "object",
+  "required": [
+    "version",
+    "dataStructureVersion",
+    "sourceDir",
+    "projectPath",
+    "pages"
+  ],
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "dataStructureVersion": {
+      "const": 2
+    },
+    "name": false,
+    "sourceDir": {
+      "const": "."
+    },
+    "projectPath": {
+      "const": "screen-pdf-project.json"
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "path",
+          "candidates",
+          "activeQuad"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          },
+          "thumbPath": {
+            "type": "null"
+          },
+          "previewPath": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  }
+}

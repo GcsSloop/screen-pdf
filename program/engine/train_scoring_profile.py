@@ -14,6 +14,7 @@ from perspective_detect import (
     detect_best_candidate_with_profile,
 )
 from supervision_utils import resolve_supervision_quad
+from project_file import project_files, resolve_image_path
 
 
 MetricProfile = dict[str, dict[str, float]]
@@ -77,22 +78,7 @@ def _candidate_entries_from_detector(
 
 
 def _resolve_image_path(project_path: Path, project_data: dict[str, Any], page: dict[str, Any]) -> Path | None:
-    raw_path = page.get("path")
-    source_dir = project_data.get("sourceDir")
-
-    candidates: list[Path] = []
-    if raw_path:
-        page_path = Path(raw_path)
-        candidates.append(page_path)
-        candidates.append(project_path.parent / raw_path)
-        candidates.append(project_path.parent / page_path.name)
-        if source_dir:
-            candidates.append(Path(source_dir) / page_path.name)
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    return resolve_image_path(project_path, page, project_data)
 
 
 def load_training_samples(
@@ -101,7 +87,7 @@ def load_training_samples(
     opencv_profile: dict[str, float] | None = None,
 ) -> list[TrainingSample]:
     samples: list[TrainingSample] = []
-    for project_path in sorted(dataset_root.rglob("screen-pdf-project.json")):
+    for project_path in project_files(dataset_root):
         data = json.loads(project_path.read_text(encoding="utf-8"))
         for page in data.get("pages", []):
             manual_quad, _ = resolve_supervision_quad(page)

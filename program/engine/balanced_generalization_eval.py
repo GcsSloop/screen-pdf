@@ -10,12 +10,15 @@ from typing import Any
 import cv2
 
 from dataset_benchmark import (
+    METRIC_CONTRACT,
+    failed_quad_geometry_metrics,
     build_project_aware_split,
     load_manual_pages,
     quad_geometry_metrics,
     summarize_geometry_metric_rows,
 )
 from detect_frame import run_model_detection
+from perspective_detect import detect_best_candidate
 from project_corner_benchmark import benchmark_project
 from two_stage_corner_pipeline import (
     GlobalCornerPredictor,
@@ -47,8 +50,25 @@ def build_runtime_runner(
         if candidate_selector_path is not None
         else None
     )
+    include_opencv_candidate = candidate_selector is not None
 
     def _runner(image_path: str, image: Any | None = None) -> dict[str, Any] | None:
+        external_candidates: list[dict[str, Any]] | None = None
+        if include_opencv_candidate:
+            runtime_image = image if image is not None else cv2.imread(image_path)
+            if runtime_image is not None:
+                opencv_result = detect_best_candidate(runtime_image)
+                if opencv_result is not None and opencv_result.get("best") is not None:
+                    best = opencv_result["best"]
+                    external_candidates = [
+                        {
+                            "quad": best.get("quad"),
+                            "score": float(best.get("score", 0.0) or 0.0),
+                            "candidate_score": float(best.get("score", 0.0) or 0.0),
+                            "source": "opencv",
+                            "expand_ratio": -1.0,
+                        }
+                    ]
         result = predict_two_stage(
             image_path=Path(image_path),
             global_predictor=global_predictor,
@@ -59,6 +79,7 @@ def build_runtime_runner(
             candidate_expand_ratios=candidate_expand_ratios,
             candidate_baseline_gate=float(candidate_baseline_gate),
             candidate_min_score_gain=float(candidate_min_score_gain),
+            external_candidates=external_candidates,
             image=image,
         )
         return {
@@ -74,19 +95,11 @@ def infer_runtime_rows(pages: list[dict[str, Any]], runtime_runner) -> dict[str,
     for page in pages:
         image_path = str(page["image_path"])
         image = cv2.imread(image_path)
-        if image is None:
-            continue
         started = time.perf_counter()
-        result = runtime_runner(image_path, image=image)
+        result = runtime_runner(image_path, image=image) if image is not None else None
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         if result is None or result.get("quad") is None:
-            metrics = {
-                "point_error": 1.0,
-                "screen_relative_point_error": 1.0,
-                "max_corner_error": 1.0,
-                "perspective_tilt_error": 90.0,
-                "quad_inset_ratio": 1.0,
-            }
+            metrics = failed_quad_geometry_metrics()
             method = "none"
         else:
             metrics = quad_geometry_metrics(page["manual_quad"], result["quad"])
@@ -133,6 +146,7 @@ def evaluate_runtime_pages(
         )
 
     summary = summarize_geometry_metric_rows(metric_rows)
+    summary["metric_contract"] = METRIC_CONTRACT
     summary["avg_page_infer_ms"] = round(sum(elapsed_ms) / len(elapsed_ms), 2) if elapsed_ms else 0.0
     summary["p95_page_infer_ms"] = round(sorted(elapsed_ms)[int(max(len(elapsed_ms) * 0.95 - 1, 0))], 2) if elapsed_ms else 0.0
     summary["method_counts"] = dict(sorted(method_counts.items()))

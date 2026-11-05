@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_file import project_files
+
 import argparse
 import json
 from pathlib import Path
@@ -60,7 +62,7 @@ def evaluate_candidate_profile(
 
 
 def _project_roots(dataset_root: Path) -> list[Path]:
-    return sorted({project.parent for project in dataset_root.rglob("screen-pdf-project.json")})
+    return sorted({project.parent for project in project_files(dataset_root)})
 
 
 def _manual_count(project_root: Path) -> int:

@@ -72,7 +72,8 @@ class DeepScreenV1Round001Tests(unittest.TestCase):
 
         self.assertEqual(comparison["decision"], "continue")
         self.assertIn("far from target", comparison["decision_reason"])
-        self.assertAlmostEqual(comparison["delta_to_teacher"]["point_error_mean"], 0.0361, places=4)
+        self.assertEqual(set(comparison["delta_to_teacher"]), {"point_le_0_01_ratio"})
+        self.assertAlmostEqual(comparison["delta_to_teacher"]["point_le_0_01_ratio"], -0.9342, places=4)
 
 
 if __name__ == "__main__":

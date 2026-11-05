@@ -8,10 +8,11 @@ import shutil
 import subprocess
 import sys
 import traceback
+from functools import lru_cache
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageCms
 from pypdf import PdfWriter
 
 from perspective_detect import detect_best_candidate
@@ -19,6 +20,7 @@ from perspective_detect import detect_best_candidate
 _MODEL_RUNTIME: dict[str, object] | None = None
 _DEEP_SCREEN_V1_RUNTIME: dict[str, object] | None = None
 _RUNTIME_RELEASE_MODEL_ID: str | None = None
+_SINGLE_MODEL_RUNTIME: tuple[Path, object] | None = None
 
 TEACHER_MULTI_EXPAND_RATIOS = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12]
 TEACHER_CANDIDATE_BASELINE_GATE = 0.45
@@ -139,7 +141,31 @@ def resolve_requested_languages(requested: str, available: list[str]) -> str:
     return "+".join(resolved)
 
 
-def save_compressed_jpeg(image: np.ndarray, output_path: Path, quality: int) -> None:
+@lru_cache(maxsize=1)
+def _srgb_icc_profile() -> bytes:
+    """Return a standard sRGB profile for images that have no embedded profile."""
+    profile = ImageCms.createProfile("sRGB")
+    return ImageCms.ImageCmsProfile(profile).tobytes()
+
+
+def source_icc_profile(image_path: Path) -> bytes:
+    """Keep the source display profile through OpenCV's pixel-only processing."""
+    try:
+        with Image.open(image_path) as source:
+            profile = source.info.get("icc_profile")
+            if isinstance(profile, bytes) and profile:
+                return profile
+    except (OSError, ValueError):
+        pass
+    return _srgb_icc_profile()
+
+
+def save_compressed_jpeg(
+    image: np.ndarray,
+    output_path: Path,
+    quality: int,
+    icc_profile: bytes | None = None,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     Image.fromarray(rgb_image).save(
@@ -149,6 +175,22 @@ def save_compressed_jpeg(image: np.ndarray, output_path: Path, quality: int) -> 
         optimize=True,
         progressive=True,
         subsampling=0,
+        icc_profile=icc_profile or _srgb_icc_profile(),
+    )
+
+
+def save_preview_png(
+    image: np.ndarray,
+    output_path: Path,
+    icc_profile: bytes | None = None,
+) -> None:
+    """Write a lossless preview while retaining color-management metadata."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    Image.fromarray(rgb_image).save(
+        output_path,
+        format="PNG",
+        icc_profile=icc_profile or _srgb_icc_profile(),
     )
 
 
@@ -195,7 +237,10 @@ def optimize_pdf_with_ghostscript(
         "-dBATCH",
         "-dDetectDuplicateImages=true",
         "-dCompressFonts=true",
-        "-dPDFSETTINGS=/ebook",
+        # /ebook downsamples color images to roughly 150 dpi and applies a
+        # visible JPEG pass. /printer keeps the already-sized page images at
+        # print quality while still allowing Ghostscript to merge/compress.
+        "-dPDFSETTINGS=/printer",
         f"-sOutputFile={optimized_path}",
         str(input_path),
     ]
@@ -331,6 +376,7 @@ def _get_model_runtime() -> dict[str, object] | None:
             "roi_predictor": RoiCornerPredictor(_model_path("corner_heatmap_model.pt")),
             "local_predictor": LocalCornerMoEPredictor(local_model) if local_model is not None else None,
             "candidate_selector": LinearCandidateExpandSelector.from_json(selector_model) if selector_model is not None else None,
+            "candidate_include_opencv": bool(selector_model is not None),
             "candidate_expand_ratios": list(TEACHER_MULTI_EXPAND_RATIOS),
             "candidate_baseline_gate": float(TEACHER_CANDIDATE_BASELINE_GATE),
             "candidate_min_score_gain": float(TEACHER_CANDIDATE_MIN_SCORE_GAIN),
@@ -409,6 +455,20 @@ def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> d
         return None
 
     try:
+        external_candidates: list[dict[str, object]] = []
+        if bool(runtime.get("candidate_include_opencv", False)):
+            opencv_result = detect_best_candidate(image)
+            if opencv_result is not None and opencv_result.get("best") is not None:
+                best = opencv_result["best"]
+                external_candidates.append(
+                    {
+                        "quad": best.get("quad"),
+                        "score": float(best.get("score", 0.0) or 0.0),
+                        "candidate_score": float(best.get("score", 0.0) or 0.0),
+                        "source": "opencv",
+                        "expand_ratio": -1.0,
+                    }
+                )
         result = predict_two_stage(
             image_path=Path(image_path),
             image=image,
@@ -420,6 +480,7 @@ def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> d
             candidate_expand_ratios=runtime.get("candidate_expand_ratios"),
             candidate_baseline_gate=float(runtime.get("candidate_baseline_gate", TEACHER_CANDIDATE_BASELINE_GATE)),
             candidate_min_score_gain=float(runtime.get("candidate_min_score_gain", TEACHER_CANDIDATE_MIN_SCORE_GAIN)),
+            external_candidates=external_candidates or None,
         )
     except Exception:
         return None
@@ -443,7 +504,34 @@ def run_teacher_detection(image_path: str, image: np.ndarray | None = None) -> d
 
 
 def run_model_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
+    single = run_single_model_detection(image_path, image=image)
+    if single is not None:
+        return single
     return run_teacher_detection(image_path, image=image)
+
+
+def run_single_model_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
+    """A single artifact owns every learned stage; legacy files are not opened."""
+    global _SINGLE_MODEL_RUNTIME
+    if not model_detection_enabled():
+        return None
+    override = os.environ.get("SCREEN_PDF_SINGLE_MODEL", "").strip()
+    model_path = Path(override).expanduser().resolve() if override else _model_path("screen_corner_single.pt")
+    if not model_path.exists():
+        if override:
+            raise FileNotFoundError(model_path)
+        return None
+    if _SINGLE_MODEL_RUNTIME is None or _SINGLE_MODEL_RUNTIME[0] != model_path:
+        from screen_corner_single import SingleModelPredictor
+        _SINGLE_MODEL_RUNTIME = (model_path, SingleModelPredictor(model_path))
+    if image is None:
+        image = cv2.imread(image_path)
+    if image is None:
+        return None
+    prediction = _SINGLE_MODEL_RUNTIME[1].predict(image)
+    return {"method": "screen_corner_single", "score": 1.0, "confidence": 0.0,
+            "metrics": {"single_model": 1.0}, "quad": prediction["final_quad"].tolist(),
+            "source": "runtime_single", "model_id": _SINGLE_MODEL_RUNTIME[1].model_id, "debug_only": False}
 
 
 def run_deep_screen_v1_detection(image_path: str, image: np.ndarray | None = None) -> dict[str, object] | None:
@@ -519,6 +607,9 @@ def _build_runtime_candidate(candidate: dict[str, object]) -> dict[str, object]:
 
 
 def build_detect_payload(image_path: str, image: np.ndarray) -> dict[str, object]:
+    single = run_single_model_detection(image_path, image=image)
+    if single is not None:
+        return {"best": _build_best_payload(single), "candidates": [_build_runtime_candidate(single)]}
     result = detect_best_candidate(image)
     if result is None:
         base_payload: dict[str, object] = {"best": None, "candidates": []}
@@ -591,10 +682,7 @@ def command_preview(image_path: str, quad_json: str, output_path: str) -> int:
     quad = np.array(json.loads(quad_json), dtype=np.float32)
     warped = warp(image, quad)
     output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(output), warped)
-    if not ok:
-        raise SystemExit(f"failed to write preview: {output}")
+    save_preview_png(warped, output, source_icc_profile(Path(image_path)))
     print(str(output))
     return 0
 
@@ -661,6 +749,7 @@ def command_export(manifest_path: str) -> int:
             warped,
             image_path,
             quality=int(manifest["options"]["jpeg_quality"]),
+            icc_profile=source_icc_profile(Path(page["path"])),
         )
 
         if ocr_enabled and tesseract_bin and effective_languages:

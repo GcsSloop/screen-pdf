@@ -55,6 +55,14 @@ def sha1(path: Path) -> str:
 
 
 def find_promoted_manifest(model_dir: Path) -> Path:
+    # Local candidate bundles intentionally do not promote the repository model.
+    if (model_dir / "screen_corner_single.pt").exists():
+        for path in sorted(model_dir.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if (payload.get("architecture") == "screen_corner_single_v1"
+                    and payload.get("status") in {"promoted", "packaged_candidate"}):
+                return path
+        raise FileNotFoundError("single model present without a matching package manifest")
     for path in sorted(model_dir.glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -120,22 +128,37 @@ def verify_bundle(
     manifest_path = find_promoted_manifest(model_dir)
     expected = expected_model_sha_map(manifest_path)
     actual = {}
-    for name in [
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    single_model = manifest.get("architecture") == "screen_corner_single_v1"
+    names = ["screen_corner_single.pt"] if single_model else [
         "global_corner_model.pt",
         "corner_heatmap_model.pt",
         "local_corner_moe_coord_model.pt",
-    ]:
+    ]
+    if single_model and not (engine_dir / "screen_corner_single.py").is_file():
+        raise FileNotFoundError("single model Python loader is missing from bundle")
+    if single_model and {p.name for p in model_dir.glob("*.pt")} != {"screen_corner_single.pt"}:
+        raise ValueError("single model bundle must contain exactly one weight file")
+    for name in names:
         path = model_dir / name
         if not path.exists():
             raise FileNotFoundError(f"missing runtime model file: {path}")
         actual[name] = sha1(path)
         expected_hash = expected.get(name)
+        if single_model and not expected_hash:
+            raise ValueError("single model manifest must declare the model hash")
         if expected_hash and expected_hash != actual[name]:
             raise ValueError(f"runtime model sha1 mismatch for {name}: expected={expected_hash} actual={actual[name]}")
+        if single_model:
+            expected_sha256 = manifest["artifacts"]["single"]["sha256"]
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+                raise ValueError("single model sha256 mismatch")
 
     smoke_result: dict[str, Any] | None = None
     if smoke_image is not None:
         env = os.environ.copy()
+        env.pop("SCREEN_PDF_SINGLE_MODEL", None)
+        env.pop("SCREEN_PDF_DISABLE_MODEL", None)
         env["SCREEN_PDF_MODEL_DIR"] = str(model_dir)
         cmd = [
             str(bundled_python),
@@ -173,6 +196,8 @@ def verify_bundle(
         best = payload.get("best") or {}
         if not str(best.get("source", "")).startswith("runtime_"):
             raise RuntimeError("smoke detection best candidate did not come from runtime model")
+        if single_model and best.get("method") != "screen_corner_single":
+            raise RuntimeError("single model bundle did not execute the single model")
 
     return {
         "bundle_path": str(bundle_path),

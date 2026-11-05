@@ -10,6 +10,7 @@ import types
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -152,6 +153,7 @@ class DetectFrameTests(unittest.TestCase):
             }
 
             with (
+                mock.patch("detect_frame.run_single_model_detection", return_value=None),
                 mock.patch("detect_frame.detect_best_candidate", return_value=opencv_result),
                 mock.patch("detect_frame.run_teacher_detection", return_value=model_result),
                 mock.patch("detect_frame.run_deep_screen_v1_detection", return_value=None),
@@ -191,6 +193,7 @@ class DetectFrameTests(unittest.TestCase):
             }
 
             with (
+                mock.patch("detect_frame.run_single_model_detection", return_value=None),
                 mock.patch("detect_frame.detect_best_candidate", return_value=opencv_result),
                 mock.patch("detect_frame.run_teacher_detection", return_value=None),
                 mock.patch("detect_frame.run_deep_screen_v1_detection", return_value=None),
@@ -239,6 +242,7 @@ class DetectFrameTests(unittest.TestCase):
 
             with (
                 mock.patch.dict("os.environ", {"SCREEN_PDF_DEBUG_DUAL_MODEL": "1"}, clear=False),
+                mock.patch("detect_frame.run_single_model_detection", return_value=None),
                 mock.patch("detect_frame.detect_best_candidate", return_value=opencv_result),
                 mock.patch("detect_frame.run_teacher_detection", return_value=teacher_result),
                 mock.patch("detect_frame.run_deep_screen_v1_detection", return_value=student_result),
@@ -320,6 +324,29 @@ class DetectFrameTests(unittest.TestCase):
         self.assertIsNotNone(runtime)
         model_cls.assert_called_once()
         self.assertEqual(model_cls.call_args.kwargs["final_output_mode"], "coarse")
+
+    def test_preview_and_jpeg_embed_an_srgb_profile_when_source_is_untagged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.jpg"
+            preview = root / "preview.png"
+            output = root / "output.jpg"
+            source_image = Image.new("RGB", (16, 12), (24, 128, 240))
+            source_image.save(source, format="JPEG")
+            image = cv2.imread(str(source))
+
+            detect_frame.save_preview_png(image, preview, detect_frame.source_icc_profile(source))
+            detect_frame.save_compressed_jpeg(
+                image,
+                output,
+                quality=92,
+                icc_profile=detect_frame.source_icc_profile(source),
+            )
+
+            with Image.open(preview) as preview_image:
+                self.assertGreater(len(preview_image.info.get("icc_profile", b"")), 0)
+            with Image.open(output) as output_image:
+                self.assertGreater(len(output_image.info.get("icc_profile", b"")), 0)
 
 
 if __name__ == "__main__":

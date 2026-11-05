@@ -35,6 +35,12 @@ screen-pdf/
 - 保留用户原始目录习惯
 - 不做覆盖式改写
 
+### 会议场次集合
+
+`data/curated/collections/conference_v1/` 是当前统一入口：会议 / 场次作为主集合，演讲保留来源，黑底、边框和遮挡等多标签作为交叉诊断。`desktop-projects/` 提供可编辑 v2 根项目及独立图像副本；`pages.jsonl` 提供按照片内容去重的显式人工真值。查看项目保留未标注页，冲突 / 无效框页面作为异常排除并保留溯源对照；基准仅使用真值明确且无冲突的页面。
+
+同图异框或跨用途冲突先进入 `conflict-review/`，不自动挑选一份。数据修订、人工校正、既有用途及模型暴露的边界见 [集合规则](../status/conference-collections.md)。基准大文件放 `research/experiments/conference-benchmark/`，文档只保留入口；输入与模型先冻结，完成后检查原项目和训练快照摘要。
+
 ### `data/curated`
 
 - 结构化后的项目、场景和标注

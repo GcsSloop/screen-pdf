@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest import mock
 
 import numpy as np
 
@@ -13,7 +16,9 @@ from train_candidate_expand_selector import (
     _build_project_sample_weights,
     _candidate_training_utility,
     _row_pairwise_preferences,
+    _row_training_weight,
     _select_training_label,
+    build_selector_training_rows,
     train_linear_selector,
 )
 
@@ -275,6 +280,134 @@ class TrainCandidateExpandSelectorTests(unittest.TestCase):
         pairs = _row_pairwise_preferences(row)
 
         self.assertEqual([(winner, loser) for winner, loser, _ in pairs], [(2, 0), (2, 1)])
+
+    def test_build_selector_training_rows_includes_opencv_candidate_from_split_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            split_dir = root / "split"
+            split_dir.mkdir()
+            image_path = root / "page.jpg"
+            image_path.write_bytes(b"fake")
+            row = {
+                "page_id": "page-1",
+                "project_name": "mall",
+                "image_path": str(image_path),
+                "manual_quad": [[0.10, 0.10], [0.90, 0.10], [0.90, 0.90], [0.10, 0.90]],
+                "opencv_best_quad": [[0.11, 0.10], [0.89, 0.10], [0.89, 0.90], [0.11, 0.90]],
+                "opencv_best_score": 0.66,
+            }
+            (split_dir / "train.jsonl").write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            fake_candidate = {
+                "roi_quad": np.array([[10.0, 10.0], [90.0, 10.0], [90.0, 90.0], [10.0, 90.0]], dtype=np.float32),
+                "final_quad": np.array([[10.0, 10.0], [90.0, 10.0], [90.0, 90.0], [10.0, 90.0]], dtype=np.float32),
+                "roi": {"x": 0, "y": 0, "width": 100, "height": 100},
+                "expand_ratio": 0.08,
+                "local_details": None,
+                "candidate_score": 0.10,
+            }
+
+            with (
+                mock.patch("train_candidate_expand_selector.cv2.imread", return_value=np.zeros((100, 100, 3), dtype=np.uint8)),
+                mock.patch("train_candidate_expand_selector.GlobalCornerPredictor") as global_cls,
+                mock.patch("train_candidate_expand_selector.RoiCornerPredictor"),
+                mock.patch("train_candidate_expand_selector.LocalCornerMoEPredictor"),
+                mock.patch("train_candidate_expand_selector._run_two_stage_candidate", return_value=fake_candidate),
+            ):
+                global_cls.return_value.predict_image.return_value = np.array(
+                    [[10.0, 10.0], [90.0, 10.0], [90.0, 90.0], [10.0, 90.0]],
+                    dtype=np.float32,
+                )
+                rows = build_selector_training_rows(
+                    split_dir=split_dir,
+                    split="train",
+                    global_model_path=Path("/tmp/global.pt"),
+                    roi_model_path=Path("/tmp/roi.pt"),
+                    local_model_path=Path("/tmp/local.pt"),
+                    candidate_expand_ratios=[0.08],
+                    baseline_expand_ratio=0.08,
+                )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].features.shape[0], 2)
+
+    def test_row_training_weight_boosts_switch_and_external_labels(self) -> None:
+        row = SelectorTrainingRow(
+            features=np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+            label_index=1,
+            candidate_metrics=[
+                {"point_error": 0.0120, "max_corner_error": 0.0340},
+                {"point_error": 0.0080, "max_corner_error": 0.0240},
+            ],
+            candidate_errors=[0.0120, 0.0080],
+            page_id="opencv-switch",
+            project_name="mall",
+            baseline_index=0,
+            candidate_sources=["runtime", "opencv"],
+            failure_layer_category="opencv_recoverable",
+        )
+
+        weight = _row_training_weight(
+            row,
+            project_weight=1.0,
+            switch_label_boost=2.0,
+            external_label_boost=3.0,
+            runtime_recoverable_boost=1.0,
+        )
+
+        self.assertEqual(weight, 6.0)
+
+    def test_row_training_weight_does_not_boost_external_label_without_matching_failure_layer(self) -> None:
+        row = SelectorTrainingRow(
+            features=np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+            label_index=1,
+            candidate_metrics=[
+                {"point_error": 0.0120, "max_corner_error": 0.0340},
+                {"point_error": 0.0080, "max_corner_error": 0.0240},
+            ],
+            candidate_errors=[0.0120, 0.0080],
+            page_id="opencv-no-failure-layer",
+            project_name="mall",
+            baseline_index=0,
+            candidate_sources=["runtime", "opencv"],
+            failure_layer_category=None,
+        )
+
+        weight = _row_training_weight(
+            row,
+            project_weight=1.0,
+            switch_label_boost=2.0,
+            external_label_boost=3.0,
+            runtime_recoverable_boost=1.0,
+        )
+
+        self.assertEqual(weight, 2.0)
+
+    def test_row_training_weight_boosts_runtime_recoverable_runtime_label(self) -> None:
+        row = SelectorTrainingRow(
+            features=np.array([[1.0, 1.0], [0.0, 0.0]], dtype=np.float32),
+            label_index=0,
+            candidate_metrics=[
+                {"point_error": 0.0080, "max_corner_error": 0.0240},
+                {"point_error": 0.0120, "max_corner_error": 0.0340},
+            ],
+            candidate_errors=[0.0080, 0.0120],
+            page_id="runtime-recoverable",
+            project_name="mall",
+            baseline_index=1,
+            candidate_sources=["runtime", "opencv"],
+            failure_layer_category="runtime_candidate_recoverable",
+        )
+
+        weight = _row_training_weight(
+            row,
+            project_weight=1.0,
+            switch_label_boost=2.0,
+            external_label_boost=3.0,
+            runtime_recoverable_boost=2.5,
+        )
+
+        self.assertEqual(weight, 5.0)
 
 
 if __name__ == "__main__":

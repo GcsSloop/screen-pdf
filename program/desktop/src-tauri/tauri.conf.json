@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ScreenPDF",
-  "version": "0.2.8",
+  "version": "0.2.28",
   "identifier": "com.gcssloop.screenpdfdesktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -38,25 +38,44 @@
       "icons/screen-pdf-desktop.icns",
       "icons/screen-pdf-desktop.ico"
     ],
-    "resources": [
-      "../../engine/detect_frame.py",
-      "../../engine/perspective_detect.py",
-      "../../engine/two_stage_corner_pipeline.py",
-      "../../engine/corner_train.py",
-      "../../engine/global_corner_train.py",
-      "../../engine/dataset_benchmark.py",
-      "../../engine/local_corner_refine.py",
-      "../../engine/local_corner_heatmap.py",
-      "../../engine/local_corner_moe.py",
-      "../../engine/local_corner_moe_coord.py",
-      "../../engine/deep_screen_v1_model.py",
-      "../../engine/supervision_utils.py",
-      "../../engine/train_scoring_profile.py",
-      "../../engine/scoring_profile.json",
-      "../../engine/opencv_profile.json",
-      "../../engine/vendor",
-      "../../../models/runtime"
-    ]
+    "macOS": {
+      "dmg": {
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    },
+    "resources": {
+      "../../engine/detect_frame.py": "engine/detect_frame.py",
+      "../../engine/screen_corner_single.py": "engine/screen_corner_single.py",
+      "../../engine/perspective_detect.py": "engine/perspective_detect.py",
+      "../../engine/two_stage_corner_pipeline.py": "engine/two_stage_corner_pipeline.py",
+      "../../engine/corner_train.py": "engine/corner_train.py",
+      "../../engine/global_corner_train.py": "engine/global_corner_train.py",
+      "../../engine/dataset_benchmark.py": "engine/dataset_benchmark.py",
+      "../../engine/project_file.py": "engine/project_file.py",
+      "../../engine/local_corner_refine.py": "engine/local_corner_refine.py",
+      "../../engine/local_corner_heatmap.py": "engine/local_corner_heatmap.py",
+      "../../engine/local_corner_moe.py": "engine/local_corner_moe.py",
+      "../../engine/local_corner_moe_coord.py": "engine/local_corner_moe_coord.py",
+      "../../engine/deep_screen_v1_model.py": "engine/deep_screen_v1_model.py",
+      "../../engine/supervision_utils.py": "engine/supervision_utils.py",
+      "../../engine/train_scoring_profile.py": "engine/train_scoring_profile.py",
+      "../../engine/scoring_profile.json": "engine/scoring_profile.json",
+      "../../engine/opencv_profile.json": "engine/opencv_profile.json",
+      "../../engine/vendor": "engine/vendor",
+      "../../../models/runtime/screen_corner_single.pt": "models/runtime/screen_corner_single.pt",
+      "../../../models/runtime/screen_corner_single.json": "models/runtime/screen_corner_single.json"
+    }
   },
   "plugins": {
     "updater": {
