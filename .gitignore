@@ -35,3 +35,4 @@ research/experiments/
 tmp_img_*.jpg
 models/runtime/*.pre_*.pt
 models/runtime/*debug*.pt
+.pnpm-store/
